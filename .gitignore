@@ -1,0 +1,28 @@
+# Test harness / driver scripts — contain real transcript content + tempauth URLs
+.driver/
+.validation-output/
+
+# Per-extension listing assets (rendered locally for partner-center upload)
+extensions/*/screenshots/
+screenshots/
+
+# Build artifacts
+dist/
+*.zip
+*.crx
+*.pem
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Node (in case anyone adds tooling later)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
