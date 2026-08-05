@@ -174,6 +174,31 @@ async function extractAndDownload(suggestedName, format) {
   );
   const vttMatch = scoped.match(scopedRe) || raw.match(scopedRe);
   if (!vttMatch) {
+    // Inline-body video without published captions. Substack lets authors
+    // drop a video embed inside a normal text post; it renders as a
+    // <video> element whose source points at /api/v1/video/upload/<id>/src
+    // on the publication's own origin. This is a different shape from a
+    // "video post," which carries post.videoUpload — body-embedded videos
+    // leave post.videoUpload null and only show up in body_html / DOM.
+    //
+    // This branch MUST run before the TTS check below: a text post with a
+    // body-embedded video frequently also carries an auto-generated TTS
+    // narration of the post text (post.audio_items[0].type === 'tts'),
+    // which would otherwise misclassify the page as a pure TTS-only post.
+    const inlineVideoEl = document.querySelector(
+      'video[src*="/api/v1/video/upload/"], video source[src*="/api/v1/video/upload/"]'
+    );
+    if (inlineVideoEl) {
+      const slug = currentPostObj?.slug || '(unknown)';
+      return {
+        error:
+          'This post has an inline-body video, but Substack has not published ' +
+          'captions for it. To transcribe it locally with Whisper, use the ' +
+          'companion CLI in tools/transcribe-substack/ (see the project README ' +
+          'for setup). Slug: ' + slug
+      };
+    }
+
     // TTS-narrated text posts: Substack synthesizes audio FROM the post
     // text using a stored voice profile (post.audio_items[].voice_id).
     // There is no recording and no transcription — the post body itself

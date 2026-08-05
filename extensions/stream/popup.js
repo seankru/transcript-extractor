@@ -26,10 +26,39 @@ extractBtn.addEventListener('click', async () => {
 
     const format = (document.querySelector('input[name="format"]:checked')?.value) === 'md' ? 'md' : 'vtt';
 
+    // Phase 0: if the user clicked from a calendar event peek, open its recap.
+    // "View recap" lives in the outlook.office.com calendar iframe; clicking it
+    // navigates the Teams frame to the correct occurrence.
+    let openedFromEvent = false;
+    try {
+      const r0 = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: clickViewRecap
+      });
+      openedFromEvent = !!r0?.some(x => x?.result === true);
+    } catch { /* no calendar frame / not permitted; continue */ }
+
+    // Phase 1: on Teams, open the meeting's Recap → Transcript for the user and
+    // read the meeting title + date/time (for a descriptive filename). No-op on
+    // non-Teams pages and inside the transcript iframe.
+    let teamsCtx = null;
+    try {
+      const prep = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: prepareTeamsContext,
+        args: [openedFromEvent]
+      });
+      teamsCtx = prep?.map(x => x?.result).find(r => r && r.isTeams) || null;
+    } catch { /* injection blocked or non-Teams; continue to extraction */ }
+
+    const userName = filenameEl.value.trim() || null;
+    const contextName = userName ? null : buildRecapName(teamsCtx);
+
+    // Phase 2: extract from whichever frame actually holds the transcript.
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
       func: extractAndDownload,
-      args: [filenameEl.value.trim() || null, format]
+      args: [userName, format, contextName]
     });
 
     // Multiple frames may run; pick the first successful extraction.
@@ -38,11 +67,27 @@ extractBtn.addEventListener('click', async () => {
     if (success) {
       let modeLine;
       if (success.mode === 'fetched') {
-        modeLine = `Source: Stream's own .vtt URL (byte-for-byte match with the Download button).\n${success.sourceUrl ? success.sourceUrl + '\n' : ''}`;
+        if (success.via === 'recap-streamcontent') {
+          modeLine = 'Source: Teams meeting recap transcript (Stream JSON, speakers preserved).\n';
+        } else {
+          modeLine = `Source: Stream's own transcript URL (matches the Download button).\n${success.sourceUrl ? success.sourceUrl + '\n' : ''}`;
+        }
       } else if (success.mode === 'native-click') {
         modeLine = `Source: Stream's native Download \u2192 ${success.buttonLabel || 'Download as .vtt'}.\n`;
       } else {
         modeLine = 'Source: DOM scrape (approximate timing, no Stream cue GUIDs).\n';
+        if (success.downloadBlockReason === 'transcript-only') {
+          modeLine += 'This looks like a transcribed-only meeting (no recording), so Stream '
+            + 'offered no Download button \u2014 scraped the transcript pane instead.\n';
+        } else if (success.downloadBlockReason === 'dlp') {
+          const lbl = success.sensitivityLabel ? ` (\u201C${success.sensitivityLabel}\u201D)` : '';
+          modeLine += `Stream\u2019s Download was unavailable, likely due to a sensitivity/DLP `
+            + `label${lbl}. Scraped the transcript pane as a backup. For Stream\u2019s `
+            + `authoritative .vtt, re-label the item to one that permits export and run again.\n`;
+        } else if (success.downloadBlockReason === 'download-failed') {
+          modeLine += 'Stream\u2019s Download/API path was unavailable, so the transcript pane '
+            + 'was scraped as a backup.\n';
+        }
       }
       if (success.mode === 'native-click') {
         setStatus(modeLine + 'Browser is saving the .vtt to your Downloads folder.');
@@ -80,9 +125,10 @@ extractBtn.addEventListener('click', async () => {
 // Injected into the active tab's content world. Must be a single self-contained
 // function (no outer-scope references) because chrome.scripting serializes it.
 // ---------------------------------------------------------------------------
-async function extractAndDownload(suggestedName, format) {
+async function extractAndDownload(suggestedName, format, contextName) {
   // Normalise format: 'vtt' (default) or 'md'.
   format = (format === 'md') ? 'md' : 'vtt';
+  contextName = contextName || null;
   function findRows() {
     return Array.from(document.querySelectorAll('[class*="listItemWithSpeaker-"]'));
   }
@@ -199,14 +245,47 @@ async function extractAndDownload(suggestedName, format) {
     return { pos, time, speaker, text };
   }
 
-  // Check whether the transcript pane is genuinely open (not just whether
-  // row elements happen to be in the DOM — closing the pane can leave them
-  // around). The in-pane Download trigger is the load-bearing signal.
+  // Whether the transcript pane is genuinely open — i.e. at least one
+  // speaker row is actually rendered and on-screen. We deliberately do NOT
+  // gate this on the in-pane Download trigger: transcript-only meetings
+  // (transcribed but never recorded) and items under a sensitivity/DLP label
+  // render the cue list while withholding the Download button. Closing the
+  // pane removes the rows from layout (0-size bounding box), so a visibility
+  // check still distinguishes "open" from "stale rows left in the DOM".
   function isTranscriptPaneOpen() {
+    return findRows().some(r => {
+      const rect = r.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+  }
+
+  // Narrower check used only by the native-download tier: is the in-pane
+  // Download trigger present, enabled, and visible? A disabled trigger is the
+  // clearest signal that a sensitivity/DLP policy is withholding export.
+  function hasUsableDownloadTrigger() {
     const btn = document.getElementById('downloadTranscript');
     if (!btn) return false;
+    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
     const r = btn.getBoundingClientRect();
-    return r.width > 0 && r.height > 0 && findRows().length > 0;
+    return r.width > 0 && r.height > 0;
+  }
+
+  // Best-effort: surface the active sensitivity label name (if the page shows
+  // one) so a "re-label to enable export" hint can name it. Returns null when
+  // no recognizable label pill is present.
+  function findSensitivityLabel() {
+    const sel = [
+      '[aria-label*="Sensitivity" i]',
+      '[data-automationid*="Sensitivity" i]',
+      '[class*="sensitivityLabel" i]',
+      '[class*="SensitivityLabel" i]'
+    ].join(',');
+    let el = null;
+    try { el = document.querySelector(sel); } catch { el = null; }
+    if (!el) return null;
+    const raw = (el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return null;
+    return raw.replace(/^sensitivity[:\s-]*/i, '').trim() || raw;
   }
 
   if (!isTranscriptPaneOpen()) {
@@ -217,8 +296,25 @@ async function extractAndDownload(suggestedName, format) {
     await ensureTranscriptOpen();
   }
   if (!isTranscriptPaneOpen()) {
-    return { error: 'No transcript rows found. Open the transcript pane first (\u2026 \u2192 Transcript).' };
+    // Rows may still be rendering — e.g. a Teams recap transcript that was just
+    // revealed by auto-navigation and is loading in a nested frame. Give the
+    // viewer up to ~12s to paint before giving up.
+    for (let i = 0; i < 60 && !isTranscriptPaneOpen(); i++) {
+      await new Promise(r => setTimeout(r, 200));
+    }
   }
+  if (!isTranscriptPaneOpen()) {
+    return { error: 'No transcript rows found. Open the transcript pane (\u2026 \u2192 Transcript). If the item is protected by a sensitivity/DLP label, the pane may stay blank until it is re-labeled to one that permits viewing.' };
+  }
+
+  // Capture the state of the authoritative download path up front, before we
+  // interact with it, so a DOM-scrape fallback can explain WHY it fell back
+  // (transcript-only vs sensitivity/DLP block) and suggest re-labeling.
+  const downloadTrigger = document.getElementById('downloadTranscript');
+  const downloadTriggerPresent = !!downloadTrigger;
+  const downloadTriggerDisabled = !!downloadTrigger &&
+    (downloadTrigger.disabled || downloadTrigger.getAttribute('aria-disabled') === 'true');
+  const sensitivityLabel = findSensitivityLabel();
 
   // -----------------------------------------------------------------------
   // Best path: drive the transcript pane's Download button and pick the
@@ -244,31 +340,24 @@ async function extractAndDownload(suggestedName, format) {
   }
 
   async function ensureTranscriptOpen() {
-    // Canonical "pane is open" signal is the visibility of the in-pane
-    // download trigger (#downloadTranscript). Row elements can persist in
-    // the DOM after the user closes the pane, so a row-count check alone is
-    // unreliable — we must verify the pane container itself is on-screen.
-    const isOpen = () => {
-      const btn = document.getElementById('downloadTranscript');
-      if (!btn) return false;
-      const r = btn.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    };
-    if (isOpen() && findRows().length > 0) return true;
+    // "Open" = at least one transcript row is visible on-screen. We rely on
+    // row visibility rather than the #downloadTranscript trigger because the
+    // trigger is absent on transcript-only meetings and can be withheld by a
+    // sensitivity/DLP label even when the cue list renders fine.
+    if (isTranscriptPaneOpen()) return true;
     const nav = findTranscriptNavButton();
     if (!nav) return false;
     nav.click();
-    // Wait for the pane to actually render: both the download trigger AND
-    // at least one row must be present and the trigger must be visible.
+    // Wait for the pane to actually render at least one visible row.
     for (let i = 0; i < 80; i++) {
       await new Promise(r => setTimeout(r, 100));
-      if (isOpen() && findRows().length > 0) {
+      if (isTranscriptPaneOpen()) {
         // One last settle so virtualization can paint the first viewport.
         await new Promise(r => setTimeout(r, 500));
         return true;
       }
     }
-    return isOpen() && findRows().length > 0;
+    return isTranscriptPaneOpen();
   }
 
   function findMenuTrigger() {
@@ -333,16 +422,27 @@ async function extractAndDownload(suggestedName, format) {
     return { triggered: true, label };
   }
 
+  // Teams recap: prefer the self-named fetch path over the site-named native
+  // download so the saved file carries our descriptive meeting name.
+  // (finishFetched / tryFetchTranscriptViaApi / saveFile are hoisted below.)
+  if (contextName) {
+    const fetchedEarly = await tryFetchTranscriptViaApi();
+    if (fetchedEarly) return finishFetched(fetchedEarly);
+  }
+
   // Native download produces a .vtt straight to the Downloads folder. We
   // can't intercept it for in-page format conversion, so skip it when the
   // user has asked for Markdown — let the fetch / scrape path own that case.
-  if (format !== 'md') {
-    const native = await tryNativeDownload();
-    if (native?.triggered) {
+  // We also skip it for Teams recaps (contextName set): the native download is
+  // named by the site (often just "transcript.vtt") and we want our own name.
+  let nativeResult = null;
+  if (format !== 'md' && !contextName) {
+    nativeResult = await tryNativeDownload();
+    if (nativeResult?.triggered) {
       return {
         mode: 'native-click',
         format,
-        buttonLabel: native.label,
+        buttonLabel: nativeResult.label,
         cueCount: 0,
         byteCount: 0,
         coverage: 'native Stream download triggered',
@@ -360,6 +460,29 @@ async function extractAndDownload(suggestedName, format) {
   async function tryFetchTranscriptViaApi() {
     let entries = [];
     try { entries = performance.getEntriesByType('resource') || []; } catch {}
+
+    // Teams meeting recaps (and transcribed-only meetings) load the canonical
+    // transcript JSON directly from a streamContent endpoint rather than via the
+    // video media-metadata call. Detect that URL and refetch it credentialed —
+    // it returns the same speakered JSON schema (entries[] with startOffset /
+    // endOffset / speakerDisplayName / text) that transcriptJsonToVtt renders.
+    const recapJsonUrl = entries
+      .map(e => e.name || '')
+      .find(u => /\/media\/transcripts\/[^/]+\/streamContent\?[^"]*format=json/i.test(u))
+      || entries
+        .map(e => e.name || '')
+        .find(u => /\/cdnmedia\/transcripts\?[^"]*isformatjson=true/i.test(u));
+    if (recapJsonUrl) {
+      try {
+        const rr = await fetch(recapJsonUrl, { credentials: 'include' });
+        if (rr.ok) {
+          const data = await rr.json();
+          if (data && Array.isArray(data.entries) && data.entries.length > 0) {
+            return { kind: 'json', data, url: recapJsonUrl, via: 'recap-streamcontent' };
+          }
+        }
+      } catch { /* fall through to metadata / legacy probe paths */ }
+    }
 
     // On page load, Stream fetches the video's media metadata via a
     //   /_api/v2.1/drives/{driveId}/items/{itemId}?select=media%2Ftranscripts...
@@ -556,16 +679,20 @@ async function extractAndDownload(suggestedName, format) {
     return out.join('\n');
   }
 
-  function saveFile(body, baseName, ext, mime) {
+  function saveFile(body, baseName, ext, mime, contextName) {
     const extension = (ext || '.vtt').toLowerCase();
     const mimeType = mime || (extension === '.md' ? 'text/markdown' : 'text/vtt');
     let filename = baseName;
     if (!filename) {
-      let title = (document.title || 'transcript')
+      let title = (document.title || '')
         .replace(/\s*-\s*Microsoft Stream$/i, '')
         .replace(/\s*\.mp4$/i, '')
         .trim();
-      title = title.replace(/[\\/:*?"<>|]/g, '_');
+      // Ignore generic viewer titles (e.g. a Teams recap iframe titled just
+      // "Transcript"/"OneTranscript") so we can fall back to the meeting name.
+      if (!title || /^(one)?transcript(\.(vtt|md|txt))?$/i.test(title)) title = '';
+      if (!title && contextName) title = String(contextName);
+      title = (title || 'transcript').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
       filename = title || 'transcript';
     }
     // Strip any existing recognized extension so we control it.
@@ -582,29 +709,18 @@ async function extractAndDownload(suggestedName, format) {
     return filename;
   }
 
-  const fetched = await tryFetchTranscriptViaApi();
-  if (fetched) {
+  function finishFetched(fetched) {
     let payload, ext, cueCount;
     if (fetched.kind === 'json') {
       cueCount = (fetched.data && Array.isArray(fetched.data.entries)) ? fetched.data.entries.length : 0;
-      if (format === 'md') {
-        payload = transcriptJsonToMarkdown(fetched.data);
-        ext = '.md';
-      } else {
-        payload = transcriptJsonToVtt(fetched.data);
-        ext = '.vtt';
-      }
+      payload = (format === 'md') ? transcriptJsonToMarkdown(fetched.data) : transcriptJsonToVtt(fetched.data);
+      ext = (format === 'md') ? '.md' : '.vtt';
     } else { // kind === 'vtt' (raw, speaker-less)
       cueCount = (fetched.body.match(/-->/g) || []).length;
-      if (format === 'md') {
-        payload = vttToMarkdown(fetched.body);
-        ext = '.md';
-      } else {
-        payload = fetched.body;
-        ext = '.vtt';
-      }
+      payload = (format === 'md') ? vttToMarkdown(fetched.body) : fetched.body;
+      ext = (format === 'md') ? '.md' : '.vtt';
     }
-    const filename = saveFile(payload, suggestedName, ext);
+    const filename = saveFile(payload, suggestedName, ext, undefined, contextName);
     return {
       mode: 'fetched',
       format,
@@ -616,6 +732,9 @@ async function extractAndDownload(suggestedName, format) {
       filename
     };
   }
+
+  const fetched = await tryFetchTranscriptViaApi();
+  if (fetched) return finishFetched(fetched);
 
   // -----------------------------------------------------------------------
   // Fallback: DOM scrape with aggressive scroll-and-rescan. Stream
@@ -752,7 +871,21 @@ async function extractAndDownload(suggestedName, format) {
     payload = vtt;
     ext = '.vtt';
   }
-  const filename = saveFile(payload, suggestedName, ext);
+  const filename = saveFile(payload, suggestedName, ext, undefined, contextName);
+
+  // Explain why the DOM scrape was used instead of Stream's authoritative
+  // download, so the popup can prompt a re-label (DLP) or note the
+  // transcript-only case.
+  let downloadBlockReason;
+  if (!downloadTriggerPresent) {
+    downloadBlockReason = 'transcript-only';
+  } else if (downloadTriggerDisabled) {
+    downloadBlockReason = 'dlp';
+  } else if (sensitivityLabel && nativeResult && nativeResult.triggered === false) {
+    downloadBlockReason = 'dlp';
+  } else {
+    downloadBlockReason = 'download-failed';
+  }
 
   return {
     mode: 'scraped',
@@ -760,6 +893,162 @@ async function extractAndDownload(suggestedName, format) {
     cueCount: cuesForVtt.length,
     byteCount: payload.length,
     coverage: cuesForVtt.length > 0 ? vttTime(parseTime(cuesForVtt[cuesForVtt.length - 1].time)) : '00:00:00.000',
-    filename
+    filename,
+    downloadBlockReason,
+    sensitivityLabel
   };
+}
+
+// ---------------------------------------------------------------------------
+// Injected into every frame; only acts in the calendar event peek (hosted on
+// outlook.office.com) where a "View recap" button opens the meeting recap in
+// the Teams frame. Returns true if it clicked. Self-contained (serialized).
+// ---------------------------------------------------------------------------
+function clickViewRecap() {
+  const btn = Array.from(document.querySelectorAll('button, [role="button"]'))
+    .find(el => /^view\s*recap$/i.test((el.textContent || '').replace(/\s+/g, ' ').trim()));
+  if (!btn) return false;
+  const r = btn.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return false;
+  btn.click();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Injected into every frame; only does work in the Teams top frame. Opens the
+// meeting's Recap tab and Transcript pill (so the SharePoint transcript iframe
+// loads) and returns the meeting title + date/time so the popup can build a
+// descriptive filename. Returns null on non-Teams pages and inside the iframe.
+// Must be self-contained (serialized by chrome.scripting).
+// ---------------------------------------------------------------------------
+async function prepareTeamsContext(openedFromEvent) {
+  const host = location.hostname || '';
+  if (!/teams\.(cloud\.microsoft|microsoft\.com)/i.test(host)) return null;
+
+  const q = sel => document.querySelector(sel);
+  const isSelected = el => !!el &&
+    (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-pressed') === 'true');
+
+  // When we arrived here by clicking "View recap" from a calendar event, the
+  // recap surface loads asynchronously in this frame — wait for a recap signal
+  // (header, Transcript pill, or recap tab) before deciding what to do.
+  const recapSignal = () => q('[data-tid="intelligent-recap-header"]')
+    || q('button[data-tid="Transcript"]')
+    || q('[data-tid="tab-item-com.microsoft.chattabs.recap"]');
+  if (openedFromEvent) {
+    for (let i = 0; i < 60 && !recapSignal(); i++) {
+      await new Promise(r => setTimeout(r, 150));
+    }
+  }
+
+  const recapTab = q('[data-tid="tab-item-com.microsoft.chattabs.recap"]');
+  const isRecapContext = !!recapSignal() || !!q('[data-tid="chat-title"]');
+  if (!isRecapContext) return null;
+
+  let navigated = false;
+  let openedRecapTab = false;
+
+  // 1) Open the Recap tab if it isn't already active.
+  if (recapTab && !isSelected(recapTab)) {
+    recapTab.click();
+    navigated = true;
+    openedRecapTab = true;
+    for (let i = 0; i < 50 && !q('[data-tid="intelligent-recap-header"]'); i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+
+  // 1b) Recurring meetings expose a "Select the meeting by time" dropdown whose
+  //     options are most-recent-first. When WE opened the recap from the chat
+  //     tab, Teams may default to an older occurrence, so pick the most recent.
+  //     If the recap was already open (the user chose an instance, or arrived
+  //     via a specific event's "View recap"), leave the selection untouched.
+  if (openedRecapTab) {
+    const combo = document.querySelector('button[role="combobox"][aria-label="Select the meeting by time"]');
+    if (combo) {
+      combo.click();
+      let options = [];
+      for (let i = 0; i < 20 && options.length === 0; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        options = Array.from(document.querySelectorAll('[role="option"]'))
+          .filter(o => /\b20\d{2}\b/.test(o.textContent || ''));
+      }
+      const current = options.find(o => o.getAttribute('aria-selected') === 'true');
+      const mostRecent = options[0];
+      if (mostRecent && mostRecent !== current) {
+        mostRecent.click();
+        navigated = true;
+        // Wait for the recap to reload for the newly selected occurrence.
+        await new Promise(r => setTimeout(r, 1200));
+      } else {
+        combo.click(); // close the dropdown without changing anything
+      }
+    }
+  }
+
+  // 2) Select the Transcript pill. This loads the SharePoint transcript in a
+  //    nested (out-of-process) frame that is NOT queryable from this top-frame
+  //    DOM, so we can't detect it here — we just click if it isn't already
+  //    selected and let phase 2 wait for the rows to render.
+  const pill = q('button[data-tid="Transcript"]') ||
+    Array.from(document.querySelectorAll('[role="tab"], button'))
+      .find(el => /^transcript$/i.test((el.textContent || '').trim()));
+  if (pill && !isSelected(pill)) {
+    pill.click();
+    navigated = true;
+  }
+
+  // 3) Give the transcript a moment to begin loading before phase 2 injects.
+  await new Promise(r => setTimeout(r, navigated ? 1500 : 400));
+
+  // 4) Meeting context for the filename. Prefer the chat title element (chat
+  //    view); fall back to the document title (calendar / event-opened recap,
+  //    which reads "(N) Calendar | <Meeting Name> | Microsoft Teams").
+  const titleEl = q('[data-tid="chat-title"]');
+  let meetingTitle = titleEl ? (titleEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
+  if (!meetingTitle) {
+    // The document title is "(N) <Surface> | <Meeting Name> | Microsoft Teams".
+    // The meeting name itself can contain '|' (e.g. "Sean | Blake 1:1"), so we
+    // strip the known prefix/suffix rather than splitting on '|'.
+    let t = (document.title || '').replace(/^\(\d+\)\s*/, '').trim();
+    t = t.replace(/\s*\|\s*Microsoft Teams\s*$/i, '');
+    t = t.replace(/^(Calendar|Chat|Activity|Files|Calls|Communities|Teams)\s*\|\s*/i, '').trim();
+    if (t && !/^(Calendar|Chat|Activity|Files|Calls|Communities|Teams|Microsoft Teams)$/i.test(t)) {
+      meetingTitle = t;
+    }
+  }
+  const headerEl = q('[data-tid="intelligent-recap-header"]');
+  return {
+    isTeams: true,
+    navigated,
+    meetingTitle,
+    dateTime: headerEl ? (headerEl.textContent || '').replace(/\s+/g, ' ').trim() : ''
+  };
+}
+
+// Parse a Teams recap header like "Thursday, July 2, 2026 1:05 PM - 1:50 PM"
+// into a compact local-time stamp "20260702_1305". Returns null if unparseable.
+function parseRecapDateTime(s) {
+  if (!s) return null;
+  const m = s.match(/([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4}).*?(\d{1,2}):(\d{2})\s*([AP]M)/i);
+  if (!m) return null;
+  const months = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  const mon = months[m[1].slice(0, 3).toLowerCase()];
+  if (!mon) return null;
+  let hr = +m[4];
+  const min = +m[5];
+  const ap = m[6].toUpperCase();
+  if (ap === 'PM' && hr !== 12) hr += 12;
+  if (ap === 'AM' && hr === 12) hr = 0;
+  const pad = n => String(n).padStart(2, '0');
+  return `${m[3]}${pad(mon)}${pad(+m[2])}_${pad(hr)}${pad(min)}`;
+}
+
+// Build a descriptive default filename for a Teams recap from the gathered
+// meeting context, e.g. "Sean | Blake 1:1 - 20260702_1305 Recap" (saveFile
+// sanitizes illegal characters). Returns null when there is no Teams context.
+function buildRecapName(ctx) {
+  if (!ctx || !ctx.meetingTitle) return null;
+  const dt = parseRecapDateTime(ctx.dateTime);
+  return dt ? `${ctx.meetingTitle} - ${dt} Recap` : `${ctx.meetingTitle} - Recap`;
 }

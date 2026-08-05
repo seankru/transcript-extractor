@@ -13,7 +13,7 @@ icons, listing checklist) more than they share code.
 
 | Extension | Folder | Hosts | Status |
 | --- | --- | --- | --- |
-| Stream Transcript Extractor | [extensions/stream](extensions/stream) | SharePoint / Microsoft Stream | Edge Add-ons draft (v0.1.0) |
+| Stream Transcript Extractor | [extensions/stream](extensions/stream) | SharePoint / Microsoft Stream / Teams recap | Edge Add-ons draft (v0.1.0) |
 | Substack Transcript Extractor | [extensions/substack](extensions/substack) | `*.substack.com` video posts | Unpacked install only (v0.1.0) |
 
 Planned siblings: YouTube (timed-text track), Zoom (cloud-recording
