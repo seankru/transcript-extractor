@@ -32,9 +32,9 @@ if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 # Zip just the extension's own contents (NOT the README, NOT the screenshots/
 # folder — those aren't part of the loadable extension surface).
 $included = @('manifest.json', 'popup.html', 'popup.js', 'icons')
-$paths = $included
-    | ForEach-Object { Join-Path $extDir $_ }
-    | Where-Object   { Test-Path $_ }
+$paths = $included |
+    ForEach-Object { Join-Path $extDir $_ } |
+    Where-Object   { Test-Path $_ }
 
 if ($paths.Count -eq 0) { throw "No extension files found under $extDir." }
 
