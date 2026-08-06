@@ -58,6 +58,12 @@ To produce a publishable zip, from the repo root:
 * Audio-only podcast posts use a different rendering path and are not
   yet supported.
 
+## Store description
+
+Substack Transcript Extractor saves the transcript from a Substack video post as a local WebVTT or Markdown file, with speaker names resolved from anonymous identifiers to real names.
+
+Substack video posts embed a signed CDN URL for the transcript file and a speaker map (for example, SPEAKER_00 → Anya Leonard) in the page's preload data. The extension reads that data, fetches the signed VTT file directly from the Substack CDN, rewrites the anonymous speaker tags to real names, and saves the result to your Downloads folder. For Markdown output, it also fetches Substack's word-level transcription JSON and uses Substack's own paragraph-chunking algorithm so the saved Markdown matches the paragraphs visible in the transcript drawer. Works on any Substack publication's video posts that have a published transcript. No DOM scraping, no remote calls beyond the same CDN your browser already loads the video from. No telemetry, no third-party code.
+
 ## License
 
 MIT.

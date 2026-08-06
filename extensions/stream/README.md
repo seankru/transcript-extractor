@@ -142,6 +142,14 @@ remote calls beyond authenticated fetches to the same SharePoint /
 Stream URLs the page already uses. Ships no telemetry, bundles no
 third-party code. See [PRIVACY.md](../../PRIVACY.md).
 
+## Store description
+
+Stream Transcript Extractor saves the transcript from a Microsoft Stream or SharePoint recording — or a Teams meeting recap, including transcribed-only meetings with no recording — as a clean WebVTT or Markdown file in your Downloads folder, with speaker names preserved.
+
+Three extraction paths are tried in order: a direct fetch of the canonical transcript JSON from Stream's SharePoint media-transcripts API or the Teams recap streamContent endpoint (preferred, includes speaker names); a native click on Stream's own Download button for recordings that have one; and a DOM scrape using a virtualised-scroll loop for cases where the API or button is unavailable, such as sensitivity-labeled items or transcribed-only meetings.
+
+Works on Microsoft Stream / SharePoint recording pages, on Teams meeting recaps opened from the meeting chat, and on meeting recaps opened from a calendar event peek. Supports both production tenants (*.sharepoint.com) and dogfood tenants (*.sharepoint-df.com). No external dependencies, no service worker, no remote calls beyond the same SharePoint and Stream URLs the page already loads.
+
 ## License
 
 [MIT](../../LICENSE).
