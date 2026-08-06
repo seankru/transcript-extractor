@@ -13,8 +13,8 @@ icons, listing checklist) more than they share code.
 
 | Extension | Folder | Hosts | Status |
 | --- | --- | --- | --- |
-| Stream Transcript Extractor | [extensions/stream](extensions/stream) | SharePoint / Microsoft Stream / Teams recap | Edge Add-ons draft (v0.1.0) |
-| Substack Transcript Extractor | [extensions/substack](extensions/substack) | `*.substack.com` video posts | Unpacked install only (v0.1.0) |
+| Stream Transcript Extractor | [extensions/stream](extensions/stream) | SharePoint / Microsoft Stream / Teams recap | Edge Add-ons draft (v0.2.0) |
+| Substack Transcript Extractor | [extensions/substack](extensions/substack) | `*.substack.com` video posts | Unpacked install only (v0.1.4) |
 
 Planned siblings: YouTube (timed-text track), Zoom (cloud-recording
 VTT export). Will appear under `extensions/youtube/` and
@@ -51,8 +51,8 @@ LICENSE                # MIT
 ## Build a release zip
 
 ```pwsh
-./scripts/build.ps1 -Name stream     # → dist/stream-transcript-extractor-v0.1.0.zip
-./scripts/build.ps1 -Name substack   # → dist/substack-transcript-extractor-v0.1.0.zip
+./scripts/build.ps1 -Name stream     # → dist/stream-transcript-extractor-v0.2.0.zip
+./scripts/build.ps1 -Name substack   # → dist/substack-transcript-extractor-v0.1.4.zip
 ```
 
 The build script zips only the files the browser actually loads
