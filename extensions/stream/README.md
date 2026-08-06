@@ -67,15 +67,19 @@ opened from the calendar).
 The popup reports cue count, byte size, and the highest timestamp
 covered. The `.vtt` (or `.md`) lands in your default Downloads folder.
 
-The extractor uses a tiered extraction path (first that succeeds wins):
+The extractor uses a tiered extraction path. For a Stream or SharePoint
+recording saved as WebVTT the order is native click → fetch → scrape; for
+Teams recaps, and whenever Markdown is selected, the native click is
+skipped and the order is fetch → scrape. First that succeeds wins:
 
-1. **Fetch** the canonical transcript JSON (with speakers) from Stream's
+1. **Native click** on Stream's `#downloadTranscript` menu → "Download as
+   .vtt" (Stream recordings only; skipped for Teams recaps and for `.md`
+   output, which the native download cannot produce).
+2. **Fetch** the canonical transcript JSON (with speakers) from Stream's
    own URL — the SharePoint media-transcripts API for recordings, or the
    Teams recap `streamContent` endpoint for meeting recaps — saved under
-   our own filename. For Teams recaps this is preferred over the native
-   download (whose filename is site-controlled).
-2. **Native click** on Stream's `#downloadTranscript` menu → "Download as
-   .vtt" (Stream recordings only; skipped for Teams recaps).
+   our own filename. For Teams recaps this runs *before* the native
+   download, whose filename is site-controlled.
 3. **DOM scrape** with a virtualised-scroll loop using
    `[class*="listItemWithSpeaker-"]`, `[class*="baseTimestamp-"]`, and
    `[class*="itemDisplayName-"]` selectors + aria-posinset/aria-setsize
@@ -144,11 +148,17 @@ third-party code. See [PRIVACY.md](../../PRIVACY.md).
 
 ## Store description
 
+<!-- BEGIN store Description field — paste everything between these two markers
+     into Partner Center Step 7 "Description" (min 250 characters). -->
+
 Stream Transcript Extractor saves the transcript from a Microsoft Stream or SharePoint recording — or a Teams meeting recap, including transcribed-only meetings with no recording — as a clean WebVTT or Markdown file in your Downloads folder, with speaker names preserved.
 
-Three extraction paths are tried in order: a direct fetch of the canonical transcript JSON from Stream's SharePoint media-transcripts API or the Teams recap streamContent endpoint (preferred, includes speaker names); a native click on Stream's own Download button for recordings that have one; and a DOM scrape using a virtualised-scroll loop for cases where the API or button is unavailable, such as sensitivity-labeled items or transcribed-only meetings.
+Three extraction paths are available, and which one runs first depends on what you are extracting. For an ordinary Stream or SharePoint recording saved as WebVTT, the extension first clicks Stream's own Download button; if that is unavailable it fetches the canonical transcript JSON from the SharePoint media-transcripts API, and failing that it falls back to a DOM scrape using a virtualised-scroll loop. For a Teams meeting recap, and whenever Markdown output is selected, the native Download click is skipped and the direct fetch runs first — for recaps that is the Teams recap streamContent endpoint, which also lets the file be saved under a descriptive meeting name rather than the site-controlled one. The DOM scrape is the last resort in every case, covering sensitivity-labeled items and transcribed-only meetings where neither the button nor the API is reachable.
 
-Works on Microsoft Stream / SharePoint recording pages, on Teams meeting recaps opened from the meeting chat, and on meeting recaps opened from a calendar event peek. Supports both production tenants (*.sharepoint.com) and dogfood tenants (*.sharepoint-df.com). No external dependencies, no service worker, no remote calls beyond the same SharePoint and Stream URLs the page already loads.
+Works on Microsoft Stream / SharePoint recording pages, on Teams meeting recaps opened from the meeting chat, and on meeting recaps opened from a calendar event peek. Supports both production tenants (*.sharepoint.com) and dogfood tenants (*.sharepoint-df.com), and also declares *.microsoftstream.com, outlook.office.com and outlook.office365.com — the last two so the "View recap" button inside the calendar event peek's Outlook iframe can be reached. Teams pages themselves are handled through the activeTab permission, granted only for the tab you invoke the extension on. No external dependencies, no service worker, no remote calls beyond the same SharePoint and Stream URLs the page already loads.
+
+<!-- END store Description field -->
+
 
 ## License
 
