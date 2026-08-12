@@ -15,9 +15,9 @@ icons, listing checklist) more than they share code.
 | --- | --- | --- | --- |
 | Stream Transcript Extractor | [extensions/stream](extensions/stream) | SharePoint / Microsoft Stream / Teams recap | Edge Add-ons draft (v0.2.0) |
 | Substack Transcript Extractor | [extensions/substack](extensions/substack) | `*.substack.com` video posts | Unpacked install only (v0.1.4) |
+| YouTube Caption Extractor | [extensions/youtube](extensions/youtube) | `*.youtube.com` videos | Unpacked install only (v0.1.0) |
 
-Planned siblings: YouTube (timed-text track), Zoom (cloud-recording
-VTT export). Will appear under `extensions/youtube/` and
+Planned sibling: Zoom (cloud-recording VTT export). It will appear under
 `extensions/zoom/` when implemented.
 
 ## Why separate extensions instead of one mega-extension?
@@ -39,6 +39,7 @@ VTT export). Will appear under `extensions/youtube/` and
 extensions/
   stream/        # Microsoft Stream extractor
   substack/      # Substack extractor
+  youtube/       # YouTube timed-text extractor
   ...
 scripts/
   build.ps1            # build extensions/<name>/ into dist/<name>-vX.Y.Z.zip
@@ -53,6 +54,7 @@ LICENSE                # MIT
 ```pwsh
 ./scripts/build.ps1 -Name stream     # → dist/stream-transcript-extractor-v0.2.0.zip
 ./scripts/build.ps1 -Name substack   # → dist/substack-transcript-extractor-v0.1.4.zip
+./scripts/build.ps1 -Name youtube    # → dist/youtube-transcript-extractor-v0.1.0.zip
 ```
 
 The build script zips only the files the browser actually loads
@@ -64,6 +66,7 @@ no screenshots, no test scaffolding.
 ```pwsh
 ./scripts/generate-icons.ps1 -OutDir extensions/stream/icons   -Hex 0078D4   # Stream / Microsoft blue
 ./scripts/generate-icons.ps1 -OutDir extensions/substack/icons -Hex FF6719   # Substack orange
+./scripts/generate-icons.ps1 -OutDir extensions/youtube/icons  -Hex FF0033   # YouTube red
 ```
 
 Both produce 16/32/48/128 PNGs: a brand-coloured rounded square with

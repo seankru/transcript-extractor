@@ -5,6 +5,7 @@
 # Usage:
 #   .\scripts\generate-icons.ps1 -OutDir extensions\stream\icons   -Hex 0078D4  # Microsoft blue
 #   .\scripts\generate-icons.ps1 -OutDir extensions\substack\icons -Hex FF6719  # Substack orange
+#   .\scripts\generate-icons.ps1 -OutDir extensions\youtube\icons  -Hex FF0033  # YouTube red
 
 param(
     [Parameter(Mandatory)][string]$OutDir,

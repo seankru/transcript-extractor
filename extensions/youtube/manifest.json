@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Caption Extractor",
+  "version": "0.1.0",
+  "description": "Save available YouTube captions as WebVTT or Markdown.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": [
+    "https://*.youtube.com/*"
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Extract YouTube captions",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  }
+}
