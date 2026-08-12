@@ -1,0 +1,13 @@
+{
+  "name": "transcript-extractor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Development tooling for the transcript-extractor browser extensions. The extensions themselves ship no npm dependencies; this manifest exists only so the test harnesses can be installed reproducibly.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node extensions/youtube/tests/run.mjs"
+  },
+  "devDependencies": {
+    "@xmldom/xmldom": "^0.9.6"
+  }
+}

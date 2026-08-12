@@ -3,6 +3,7 @@
 # Usage:
 #   .\scripts\build.ps1 -Name stream
 #   .\scripts\build.ps1 -Name substack
+#   .\scripts\build.ps1 -Name youtube
 #
 # Output: dist\<name>-transcript-extractor-v<version>.zip, where <version> is
 # read from extensions\<name>\manifest.json.
