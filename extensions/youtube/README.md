@@ -11,7 +11,8 @@ caption track as a clean `.vtt` or `.md` file.
 4. Click **Extract & Download**.
 
 The popup lists both creator-provided and auto-generated caption tracks.
-Markdown output contains one timestamped line per YouTube cue.
+Markdown output contains one timestamped line per YouTube cue and preserves
+YouTube chapters as timestamped section headings when the video provides them.
 
 ## Install (developer mode)
 
