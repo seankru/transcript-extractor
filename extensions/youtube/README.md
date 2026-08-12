@@ -25,12 +25,24 @@ YouTube chapters as timestamped section headings when the video provides them.
 
 | Permission | Why |
 | --- | --- |
-| `activeTab` | Access only the YouTube tab where you click the extension. |
+| `activeTab` | Temporary access to the tab you invoked the extension on. The popup additionally checks that tab's origin and refuses to run anywhere but YouTube. |
 | `scripting` | Read the current player's caption-track metadata and download the selected track. |
-| `https://*.youtube.com/*` | Restrict page and timed-text access to YouTube. |
+| `https://*.youtube.com/*` | Declares YouTube as the extension's host scope. |
 
-All processing happens in the current browser tab. The extension has no
-telemetry and sends no data to third parties.
+All processing happens in the current browser tab. Caption downloads are
+fetched only from `youtube.com` / `youtube-nocookie.com` hosts, enforced in
+`popup.js`. The extension has no telemetry and sends no data to third parties.
+
+## Tests
+
+```powershell
+node tests\run.mjs
+```
+
+The harness covers the pure transcript logic — JSON3 and XML cue parsing,
+double-escaped entity handling, cue ordering, VTT escaping, Markdown chapter
+placement (including chapters after the last cue), filename sanitisation and
+the caption-host allowlist. It does not exercise the live YouTube player.
 
 ## Limitations
 
