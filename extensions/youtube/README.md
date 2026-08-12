@@ -37,26 +37,28 @@ fetched only from `youtube.com` / `youtube-nocookie.com` hosts, enforced in
 ## Tests
 
 ```powershell
+npm install
 node tests\run.mjs
 ```
 
 The harness covers the pure transcript logic — JSON3 and XML/SRV3 cue parsing,
-double-escaped entity handling, cue ordering, VTT escaping, Markdown chapter
-placement (including chapters after the last cue and the `ytInitialData`
-fallback), filename sanitisation, the caption-host allowlist, and the
-caption-URL matching used by the Proof-of-Origin fallbacks.
+rejection of non-timedtext bodies (an HTTP 200 bot interstitial must not parse
+as captions), double-escaped entity handling, cue ordering, VTT escaping,
+Markdown chapter placement (including chapters after the last cue and the
+video-id-guarded `ytInitialData` fallback), filename sanitisation, the
+caption-host allowlist, and the caption-URL matching used by the
+Proof-of-Origin fallbacks.
 
 `xmlToCues` needs a DOM parser. Node has no global `DOMParser`, so the harness
 loads `@xmldom/xmldom` and **fails** if neither is available — it does not skip.
-Install it first:
+It is declared in the repository-root `package.json` as a dev dependency, so
+`npm install` from the repository root is enough.
 
-```powershell
-npm install --no-save @xmldom/xmldom
-```
-
-It does not exercise the live YouTube player: Proof-of-Origin token discovery,
-the runtime resource-timing fallback and caption-module restoration are covered
-only at the boundaries reachable without a real player.
+`findRuntimeCaptionUrl` is exercised against a fake `movie_player` and a stubbed
+resource-timing buffer, covering the `setOption` sequencing, stale-resource
+rejection and the caption-module restore round-trip. That is not the same as a
+live player: real Proof-of-Origin token discovery and the browser's own
+resource-timing behaviour remain unverified.
 
 ## Limitations
 
