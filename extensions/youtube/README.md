@@ -28,6 +28,7 @@ YouTube chapters as timestamped section headings when the video provides them.
 | `activeTab` | Temporary access to the tab you invoked the extension on. The popup additionally checks that tab's origin and refuses to run anywhere but YouTube. |
 | `scripting` | Read the current player's caption-track metadata and download the selected track. |
 | `https://*.youtube.com/*` | Declares YouTube as the extension's host scope. |
+| `https://*.youtube-nocookie.com/*` | The origin checks accept privacy-enhanced embeds, so the host scope declares them rather than relying on `activeTab` alone. |
 
 All processing happens in the current browser tab. Caption downloads are
 fetched only from `youtube.com` / `youtube-nocookie.com` hosts, enforced in
@@ -39,10 +40,23 @@ fetched only from `youtube.com` / `youtube-nocookie.com` hosts, enforced in
 node tests\run.mjs
 ```
 
-The harness covers the pure transcript logic — JSON3 and XML cue parsing,
+The harness covers the pure transcript logic — JSON3 and XML/SRV3 cue parsing,
 double-escaped entity handling, cue ordering, VTT escaping, Markdown chapter
-placement (including chapters after the last cue), filename sanitisation and
-the caption-host allowlist. It does not exercise the live YouTube player.
+placement (including chapters after the last cue and the `ytInitialData`
+fallback), filename sanitisation, the caption-host allowlist, and the
+caption-URL matching used by the Proof-of-Origin fallbacks.
+
+`xmlToCues` needs a DOM parser. Node has no global `DOMParser`, so the harness
+loads `@xmldom/xmldom` and **fails** if neither is available — it does not skip.
+Install it first:
+
+```powershell
+npm install --no-save @xmldom/xmldom
+```
+
+It does not exercise the live YouTube player: Proof-of-Origin token discovery,
+the runtime resource-timing fallback and caption-module restoration are covered
+only at the boundaries reachable without a real player.
 
 ## Limitations
 

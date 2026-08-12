@@ -34,18 +34,39 @@ function extractFunction(name) {
 }
 
 const NAMES = [
-  'cleanText', 'trackName', 'jsonToCues', 'decodeEntities', 'xmlToCues',
-  'vttTime', 'shortTime', 'cuesToVtt', 'cuesToMarkdown', 'fillCueEndTimes',
-  'isYouTubeCaptionHost', 'isYouTubeTabUrl', 'captionUrlMatchesTrack',
-  'extractChapters'
+  'cleanText', 'trackName', 'jsonToCues', 'decodeEntities', 'nodeTextWithBreaks',
+  'xmlToCues', 'vttTime', 'shortTime', 'cuesToVtt', 'cuesToMarkdown',
+  'fillCueEndTimes', 'isYouTubeCaptionHost', 'isYouTubeTabUrl',
+  'captionUrlMatchesTrack', 'extractChapters', 'findAudioCaptionUrl',
+  'findRuntimeCaptionUrl', 'fetchCaptionTrack', 'saveFile'
 ];
+
+// xmlToCues is a supported extraction path and must be executed, not skipped.
+// The previous harness guarded it on `typeof DOMParser === 'function'`, which is
+// false under Node, so the suite printed SKIP and still exited 0 with the whole
+// XML/SRV3 path unexercised. A test that cannot fail is not coverage.
+let DOMParserImpl = globalThis.DOMParser;
+if (typeof DOMParserImpl !== 'function') {
+  try {
+    ({ DOMParser: DOMParserImpl } = await import('@xmldom/xmldom'));
+  } catch {
+    console.error(
+      'FAIL xmlToCues cannot run: no global DOMParser and @xmldom/xmldom is not installed.\n' +
+      '  Install it (npm install --no-save @xmldom/xmldom) or run this suite in a browser.\n' +
+      '  This is a hard failure by design: skipping leaves the XML/SRV3 path untested.'
+    );
+    process.exit(1);
+  }
+}
 
 const preamble = 'const location = { href: "https://www.youtube.com/watch?v=abc" };\n';
 const body = NAMES.map(extractFunction).join('\n');
+// The globals below are read through globalThis rather than captured, so a test
+// can install a fake player or fetch after the functions are built.
 const api = new Function(
   'DOMParser',
   `${preamble}${body}\nreturn { ${NAMES.join(', ')} };`
-)(globalThis.DOMParser);
+)(DOMParserImpl);
 
 let passed = 0;
 let failed = 0;
@@ -82,6 +103,18 @@ check('jsonToCues parses segs and skips empty events',
 
 check('jsonToCues tolerates missing input', api.jsonToCues(null), []);
 
+check('jsonToCues sorts out-of-order events so cue ends are correct',
+  api.jsonToCues({
+    events: [
+      { tStartMs: 5000, segs: [{ utf8: 'later' }] },
+      { tStartMs: 0, segs: [{ utf8: 'earlier' }] }
+    ]
+  }),
+  [
+    { startMs: 0, endMs: 0, text: 'earlier' },
+    { startMs: 5000, endMs: 5000, text: 'later' }
+  ]);
+
 // --- decodeEntities ---------------------------------------------------------
 check('decodeEntities resolves the second escaping level',
   api.decodeEntities('it&#39;s &amp; more &lt;tag&gt;'),
@@ -89,6 +122,12 @@ check('decodeEntities resolves the second escaping level',
 check('decodeEntities leaves unknown entities alone',
   api.decodeEntities('&notareal; text'), '&notareal; text');
 check('decodeEntities handles hex references', api.decodeEntities('&#x27;'), "'");
+// String.fromCodePoint throws RangeError above U+10FFFF; unguarded it aborted
+// the entire XML fallback extraction.
+check('decodeEntities leaves an out-of-range code point intact',
+  api.decodeEntities('a &#x110000; b'), 'a &#x110000; b');
+check('decodeEntities leaves a lone surrogate intact',
+  api.decodeEntities('a &#xD800; b'), 'a &#xD800; b');
 
 // --- fillCueEndTimes --------------------------------------------------------
 check('fillCueEndTimes uses the next start when the duration is zero',
@@ -110,7 +149,7 @@ check('shortTime keeps the hour when present', api.shortTime(3665000), '1:01:05'
 // --- cuesToVtt --------------------------------------------------------------
 check('cuesToVtt escapes markup and arrows',
   api.cuesToVtt([{ startMs: 0, endMs: 1000, text: 'a & b <c> --> d' }]),
-  ['WEBVTT', '', '00:00:00.000 --> 00:00:01.000', 'a &amp; b &lt;c> -> d', ''].join('\n'));
+  ['WEBVTT', '', '00:00:00.000 --> 00:00:01.000', 'a &amp; b &lt;c&gt; --&gt; d', ''].join('\n'));
 
 // --- cuesToMarkdown ---------------------------------------------------------
 // Regression for the panel's top finding: chapters starting after the last cue
@@ -137,6 +176,10 @@ checkTrue('cuesToMarkdown places trailing chapters after the last cue line',
 const noChapters = api.cuesToMarkdown([{ startMs: 0, text: 'a' }], 'Title', []);
 check('cuesToMarkdown reports zero when there are no chapters',
   noChapters.chapterCount, 0);
+// A title containing a newline injected extra Markdown headings into the export.
+check('cuesToMarkdown flattens a multi-line title into one heading',
+  (api.cuesToMarkdown([{ startMs: 0, text: 'a' }], 'Real\n## Injected', []).markdown
+    .match(/^#+ /gm) || []).length, 1);
 check('cuesToMarkdown renders a heading and cue lines',
   noChapters.markdown, ['# Title', '', '**[00:00]** a', ''].join('\n'));
 
@@ -172,6 +215,21 @@ check('captionUrlMatchesTrack rejects a different video',
     'https://www.youtube.com/api/timedtext?v=zzz&lang=en&kind=asr', asrTrack, 'abc'), false);
 check('captionUrlMatchesTrack rejects a non-timedtext path',
   api.captionUrlMatchesTrack('https://www.youtube.com/watch?v=abc', asrTrack, 'abc'), false);
+// A resource-timing entry can come from any origin on the page; a third-party
+// URL must not be able to hijack the POT fallback into a refused fetch.
+check('captionUrlMatchesTrack rejects a non-YouTube host',
+  api.captionUrlMatchesTrack(
+    'https://evil.example.com/api/timedtext?v=abc&lang=en&kind=asr&vssId=a.en', asrTrack, 'abc'), false);
+check('captionUrlMatchesTrack rejects http',
+  api.captionUrlMatchesTrack(
+    'http://www.youtube.com/api/timedtext?v=abc&lang=en&kind=asr&vssId=a.en', asrTrack, 'abc'), false);
+// Missing identifying parameters were treated as wildcards.
+check('captionUrlMatchesTrack rejects a URL with no video id',
+  api.captionUrlMatchesTrack(
+    'https://www.youtube.com/api/timedtext?lang=en&kind=asr', asrTrack, 'abc'), false);
+check('captionUrlMatchesTrack rejects a URL with no language',
+  api.captionUrlMatchesTrack(
+    'https://www.youtube.com/api/timedtext?v=abc&kind=asr', asrTrack, 'abc'), false);
 
 // --- extractChapters --------------------------------------------------------
 check('extractChapters reads, cleans and sorts chapter markers',
@@ -204,21 +262,145 @@ check('extractChapters reads, cleans and sorts chapter markers',
 check('extractChapters returns empty when the player response has none',
   api.extractChapters({}), []);
 
-// --- xmlToCues (needs a DOMParser) -----------------------------------------
-if (typeof globalThis.DOMParser === 'function') {
-  const xml = '<transcript>' +
-    '<text start="2" dur="1">later &amp;#39;quote&amp;#39;</text>' +
-    '<text start="0" dur="1">earlier</text>' +
-    '</transcript>';
-  check('xmlToCues sorts cues chronologically and decodes double escaping',
-    api.xmlToCues(xml),
-    [
-      { startMs: 0, endMs: 1000, text: 'earlier' },
-      { startMs: 2000, endMs: 3000, text: "later 'quote'" }
-    ]);
-} else {
-  console.log('SKIP xmlToCues - this runtime has no DOMParser');
+// markersMap is served in the /next response (window.ytInitialData) on real
+// watch pages; reading only the player response most likely emitted no chapters.
+const chaptersIn = (markers) => ({
+  playerOverlays: {
+    playerOverlayRenderer: {
+      decoratedPlayerBarRenderer: {
+        decoratedPlayerBarRenderer: {
+          playerBar: { multiMarkersPlayerBarRenderer: { markersMap: markers } }
+        }
+      }
+    }
+  }
+});
+const initialDataChapters = chaptersIn([{
+  key: 'DESCRIPTION_CHAPTERS',
+  value: {
+    chapters: [
+      { chapterRenderer: { title: { simpleText: 'From ytInitialData' }, timeRangeStartMillis: 0 } }
+    ]
+  }
+}]);
+
+check('extractChapters falls back to ytInitialData when the player response has none',
+  api.extractChapters({}, initialDataChapters),
+  [{ startMs: 0, title: 'From ytInitialData' }]);
+
+check('extractChapters ignores a ytInitialData markersMap with no chapter key',
+  api.extractChapters({}, chaptersIn([{ key: 'AUTO_CHAPTERS', value: { chapters: [] } }])), []);
+
+check('extractChapters tolerates a missing ytInitialData argument',
+  api.extractChapters({}, undefined), []);
+
+// --- functions the previous harness never loaded ----------------------------
+// findAudioCaptionUrl, findRuntimeCaptionUrl, fetchCaptionTrack and saveFile
+// were absent from NAMES, so the POT/player-internals code had zero coverage.
+// These run in the page's MAIN world, so the browser globals they reach for are
+// stubbed here rather than captured at build time.
+globalThis.document = { getElementById: () => null };
+globalThis.performance = globalThis.performance || { getEntriesByType: () => [] };
+
+check('findAudioCaptionUrl returns null when the player is absent',
+  api.findAudioCaptionUrl(asrTrack, 'abc'), null);
+
+const potUrl = 'https://www.youtube.com/api/timedtext?v=abc&lang=en&kind=asr&vssId=a.en&pot=TOKEN';
+function fakePlayer(captionTracks) {
+  globalThis.document = {
+    getElementById: (id) => id === 'movie_player'
+      ? { getAudioTrack: () => ({ captionTracks }) }
+      : null
+  };
 }
+fakePlayer([{ vssId: 'a.en', baseUrl: potUrl }]);
+check('findAudioCaptionUrl returns a matching tokenized URL',
+  api.findAudioCaptionUrl(asrTrack, 'abc'), potUrl);
+
+fakePlayer([{ vssId: 'a.en', baseUrl: potUrl.replace('&pot=TOKEN', '') }]);
+check('findAudioCaptionUrl rejects a candidate with no POT token',
+  api.findAudioCaptionUrl(asrTrack, 'abc'), null);
+
+fakePlayer([{ vssId: 'a.en', baseUrl: 'https://evil.example.com/api/timedtext?v=abc&lang=en&kind=asr&pot=T' }]);
+check('findAudioCaptionUrl rejects an off-YouTube candidate',
+  api.findAudioCaptionUrl(asrTrack, 'abc'), null);
+
+globalThis.document = { getElementById: () => null };
+checkTrue('findRuntimeCaptionUrl resolves to null without a player',
+  (await api.findRuntimeCaptionUrl(asrTrack, 'abc')) === null);
+
+// fetchCaptionTrack must refuse a non-YouTube host before any network call.
+let fetchCalls = 0;
+globalThis.fetch = async () => { fetchCalls++; return { ok: true, status: 200, text: async () => 'body' }; };
+const blocked = await api.fetchCaptionTrack('https://evil.example.com/api/timedtext?v=abc');
+check('fetchCaptionTrack blocks a non-YouTube host',
+  { blocked: blocked.blocked, ok: blocked.ok }, { blocked: true, ok: false });
+check('fetchCaptionTrack makes no network call when blocked', fetchCalls, 0);
+
+const blockedHttp = await api.fetchCaptionTrack('http://www.youtube.com/api/timedtext?v=abc');
+check('fetchCaptionTrack blocks plain http', blockedHttp.blocked, true);
+
+let requestedUrl = null;
+globalThis.fetch = async (url) => {
+  requestedUrl = url;
+  return { ok: true, status: 200, text: async () => 'caption body' };
+};
+const allowed = await api.fetchCaptionTrack('https://www.youtube.com/api/timedtext?v=abc');
+check('fetchCaptionTrack fetches an allowed host',
+  { ok: allowed.ok, body: allowed.body }, { ok: true, body: 'caption body' });
+checkTrue('fetchCaptionTrack requests json3',
+  new URL(requestedUrl).searchParams.get('fmt') === 'json3');
+
+// saveFile - the README claims the harness covers filename sanitisation.
+const savedNames = [];
+globalThis.URL.createObjectURL = () => 'blob:fake';
+globalThis.URL.revokeObjectURL = () => {};
+globalThis.Blob = class { constructor(parts) { this.parts = parts; } };
+globalThis.document = {
+  createElement: () => ({ click() {}, remove() {}, set download(v) { savedNames.push(v); } }),
+  body: { appendChild() {} }
+};
+check('saveFile strips path-hostile characters',
+  api.saveFile('body', 'a/b:c*?"<>|d', '.vtt', 'fallback'), 'a_b_c______d.vtt');
+check('saveFile trims the YouTube suffix and applies the extension',
+  api.saveFile('body', 'My Talk - YouTube', '.md', 'fallback'), 'My Talk.md');
+check('saveFile falls back when the name is empty after cleaning',
+  api.saveFile('body', '   ', '.vtt', ''), 'youtube-captions.vtt');
+check('saveFile does not double up an existing extension',
+  api.saveFile('body', 'notes.md', '.md', 'fallback'), 'notes.md');
+
+// --- xmlToCues (always runs; see the DOMParser resolution above) ------------
+const xml = '<transcript>' +
+  '<text start="2" dur="1">later &amp;#39;quote&amp;#39;</text>' +
+  '<text start="0" dur="1">earlier</text>' +
+  '</transcript>';
+check('xmlToCues sorts cues chronologically and decodes double escaping',
+  api.xmlToCues(xml),
+  [
+    { startMs: 0, endMs: 1000, text: 'earlier' },
+    { startMs: 2000, endMs: 3000, text: "later 'quote'" }
+  ]);
+
+// textContent drops <br/> without whitespace, joining words across caption line
+// breaks: "first<br/>second" exported as the corrupt "firstsecond".
+check('xmlToCues keeps a word boundary across a legacy <br/>',
+  api.xmlToCues('<transcript><text start="0" dur="1">first<br/>second</text></transcript>'),
+  [{ startMs: 0, endMs: 1000, text: 'first second' }]);
+
+check('xmlToCues reads an SRV3 <p> element',
+  api.xmlToCues('<timedtext><body><p t="1500" d="500">srv3 cue</p></body></timedtext>'),
+  [{ startMs: 1500, endMs: 2000, text: 'srv3 cue' }]);
+
+check('xmlToCues keeps a word boundary across an SRV3 <br/>',
+  api.xmlToCues('<timedtext><body><p t="0" d="1000">alpha<br/>beta</p></body></timedtext>'),
+  [{ startMs: 0, endMs: 1000, text: 'alpha beta' }]);
+
+check('xmlToCues drops cues that are empty after cleaning',
+  api.xmlToCues('<transcript><text start="0" dur="1">   </text></transcript>'), []);
+
+check('xmlToCues survives an out-of-range entity rather than throwing',
+  api.xmlToCues('<transcript><text start="0" dur="1">ok &amp;#x110000; end</text></transcript>'),
+  [{ startMs: 0, endMs: 1000, text: 'ok &#x110000; end' }]);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

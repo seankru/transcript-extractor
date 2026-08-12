@@ -201,7 +201,9 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
       const durationMs = Math.max(0, Number(event.dDurationMs) || 0);
       cues.push({ startMs, endMs: startMs + durationMs, text });
     }
-    return cues;
+    // fillCueEndTimes reads cues[i+1] as the chronological successor, so JSON3
+    // events that arrive out of order would otherwise produce wrong cue ends.
+    return cues.sort((a, b) => a.startMs - b.startMs);
   }
 
   function decodeEntities(value) {
@@ -212,7 +214,11 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
         const code = entity[1] === 'x' || entity[1] === 'X'
           ? Number.parseInt(entity.slice(2), 16)
           : Number.parseInt(entity.slice(1), 10);
-        return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : match;
+        // String.fromCodePoint throws RangeError outside Unicode range or on a
+        // surrogate half; an unguarded call aborts the whole XML fallback.
+        const inRange = Number.isFinite(code) && code > 0 && code <= 0x10ffff &&
+          !(code >= 0xd800 && code <= 0xdfff);
+        return inRange ? String.fromCodePoint(code) : match;
       }
       const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
       return Object.prototype.hasOwnProperty.call(named, entity.toLowerCase())
@@ -221,19 +227,40 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
     });
   }
 
+  function nodeTextWithBreaks(node) {
+    // textContent drops <br/> boundaries without substituting whitespace, so
+    // "first<br/>second" would export as the corrupt "firstsecond". Walk the
+    // children instead and turn each break element into a space.
+    if (!node) return '';
+    let out = '';
+    for (const child of Array.from(node.childNodes || [])) {
+      if (child.nodeType === 1) {
+        out += String(child.nodeName || '').toLowerCase() === 'br'
+          ? ' '
+          : nodeTextWithBreaks(child);
+      } else {
+        out += child.nodeValue || '';
+      }
+    }
+    return out;
+  }
+
   function xmlToCues(xmlText) {
     const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
-    if (doc.querySelector('parsererror')) return [];
+    // getElementsByTagName rather than querySelector: it is the one lookup every
+    // XML DOM implementation provides, so this path stays testable outside a
+    // browser instead of being skipped.
+    if (doc.getElementsByTagName('parsererror').length) return [];
 
-    const legacy = Array.from(doc.querySelectorAll('text')).map(node => {
+    const legacy = Array.from(doc.getElementsByTagName('text')).map(node => {
       const startMs = Math.max(0, (Number(node.getAttribute('start')) || 0) * 1000);
       const durationMs = Math.max(0, (Number(node.getAttribute('dur')) || 0) * 1000);
-      return { startMs, endMs: startMs + durationMs, text: cleanText(decodeEntities(node.textContent)) };
+      return { startMs, endMs: startMs + durationMs, text: cleanText(decodeEntities(nodeTextWithBreaks(node))) };
     });
-    const srv3 = Array.from(doc.querySelectorAll('p')).map(node => {
+    const srv3 = Array.from(doc.getElementsByTagName('p')).map(node => {
       const startMs = Math.max(0, Number(node.getAttribute('t')) || 0);
       const durationMs = Math.max(0, Number(node.getAttribute('d')) || 0);
-      return { startMs, endMs: startMs + durationMs, text: cleanText(decodeEntities(node.textContent)) };
+      return { startMs, endMs: startMs + durationMs, text: cleanText(decodeEntities(nodeTextWithBreaks(node))) };
     });
     // fillCueEndTimes assumes cues[i+1] is the chronological successor, which
     // concatenating two document sections does not guarantee.
@@ -245,14 +272,19 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
   function captionUrlMatchesTrack(rawUrl, track, videoId) {
     try {
       const url = new URL(rawUrl, location.href);
+      // A resource-timing entry can come from any origin on the page, so the
+      // host is checked here too rather than only at fetch time.
+      if (url.protocol !== 'https:' || !isYouTubeCaptionHost(url.hostname)) return false;
       if (!/\/api\/timedtext$/i.test(url.pathname)) return false;
       const urlVideoId = url.searchParams.get('v');
       const languageCode = url.searchParams.get('lang');
       const kind = url.searchParams.get('kind');
       const vssId = url.searchParams.get('vssId') || url.searchParams.get('vss_id');
       const name = url.searchParams.get('name');
-      if (urlVideoId && videoId && urlVideoId !== videoId) return false;
-      if (languageCode && track.languageCode && languageCode !== track.languageCode) return false;
+      // A missing identifying parameter is not a match: treating it as a
+      // wildcard let an unrelated entry win the POT fallback.
+      if (videoId && urlVideoId !== videoId) return false;
+      if (track.languageCode && languageCode !== track.languageCode) return false;
       if (vssId && track.vssId && vssId !== track.vssId) return false;
       if (name && trackName(track) && name !== trackName(track)) return false;
       if (track.kind === 'asr' && kind && kind !== 'asr') return false;
@@ -342,7 +374,14 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
       } else if (previousTrackRead) {
         try { player.setOption('captions', 'track', previousTrack || {}); } catch { /* best effort */ }
       } else if (trackWasMutated) {
-        try { player.setOption('captions', 'track', {}); } catch { /* best effort */ }
+        // The prior track was unreadable, so it cannot be restored. Unloading
+        // the module leaves the player closer to its untouched state than
+        // setOption({}), which pins captions off.
+        if (typeof player.unloadModule === 'function') {
+          try { player.unloadModule('captions'); } catch { /* best effort */ }
+        } else {
+          try { player.setOption('captions', 'track', {}); } catch { /* best effort */ }
+        }
       }
     }
   }
@@ -425,22 +464,32 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
     for (const cue of cues) {
       lines.push(
         `${vttTime(cue.startMs)} --> ${vttTime(cue.endMs)}`,
+        // Escaping > covers the "-->" cue-terminator case too, since the
+        // escaped form "--&gt;" can no longer be read as a terminator.
         cue.text
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
-          .replace(/-->/g, '->'),
+          .replace(/>/g, '&gt;'),
         ''
       );
     }
     return lines.join('\n');
   }
 
-  function extractChapters(playerResponse) {
-    const markerMaps = playerResponse?.playerOverlays?.playerOverlayRenderer
-      ?.decoratedPlayerBarRenderer?.decoratedPlayerBarRenderer?.playerBar
-      ?.multiMarkersPlayerBarRenderer?.markersMap || [];
-    const chapterEntries = markerMaps.find(entry => entry?.key === 'DESCRIPTION_CHAPTERS')
-      ?.value?.chapters || [];
+  function extractChapters(playerResponse, initialData) {
+    // markersMap is served in the /next response (window.ytInitialData) on real
+    // watch pages; the player response does not always carry it. Read both and
+    // take whichever supplies DESCRIPTION_CHAPTERS.
+    const sources = [playerResponse, initialData];
+    let chapterEntries = [];
+    for (const source of sources) {
+      const markerMaps = source?.playerOverlays?.playerOverlayRenderer
+        ?.decoratedPlayerBarRenderer?.decoratedPlayerBarRenderer?.playerBar
+        ?.multiMarkersPlayerBarRenderer?.markersMap || [];
+      const found = markerMaps.find(entry => entry?.key === 'DESCRIPTION_CHAPTERS')
+        ?.value?.chapters || [];
+      if (found.length) { chapterEntries = found; break; }
+    }
     return chapterEntries.map(entry => {
       const chapter = entry?.chapterRenderer;
       const title = chapter?.title?.simpleText ||
@@ -453,7 +502,9 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
   }
 
   function cuesToMarkdown(cues, title, chapters) {
-    const lines = [`# ${title || 'Transcript'}`, ''];
+    // cleanText collapses newlines: an untreated title injects extra Markdown
+    // headings into the export.
+    const lines = [`# ${cleanText(title) || 'Transcript'}`, ''];
     let chapterIndex = 0;
     let emitted = 0;
     for (const cue of cues) {
@@ -544,7 +595,7 @@ async function extractAndDownload(trackIndex, suggestedName, format, expectedVid
   if (!cues.length) return { error: 'The selected caption track contained no readable cues.' };
 
   const title = response.videoDetails?.title || document.title.replace(/\s*-\s*YouTube\s*$/i, '');
-  const chapters = format === 'md' ? extractChapters(response) : [];
+  const chapters = format === 'md' ? extractChapters(response, window.ytInitialData) : [];
   const rendered = format === 'md' ? cuesToMarkdown(cues, title, chapters) : null;
   const payload = rendered ? rendered.markdown : cuesToVtt(cues);
   const extension = format === 'md' ? '.md' : '.vtt';
