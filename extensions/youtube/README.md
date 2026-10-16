@@ -5,16 +5,23 @@ caption track as a clean `.vtt` or `.md` file.
 
 ## Use
 
-1. Open a YouTube video that has captions.
+1. Open a YouTube video.
 2. Click **YouTube Caption Extractor** in the browser toolbar.
-3. Choose a caption track and output format.
+3. Optionally choose a caption track and output format (Markdown is default).
 4. Click **Extract & Download**.
 
 The popup lists both creator-provided and auto-generated caption tracks.
+Creator-provided captions are selected preferentially. Without readable captions,
+the button asks before downloading and starting local Whisper. The optional
+**Automatically transcribe when captions are unavailable** checkbox remembers
+opt-in for this extension; it defaults off. Transcription uses the optional
+[native helper](../../tools/local-transcription/README.md).
 Markdown output contains one timestamped line per YouTube cue and preserves
 YouTube chapters as timestamped section headings when the video provides them.
 
 ## Install (developer mode)
+
+Run `pwsh .\scripts\prepare-extensions.ps1` from the repository root first.
 
 1. Open `edge://extensions` or `chrome://extensions`.
 2. Enable **Developer mode**.
@@ -27,12 +34,16 @@ YouTube chapters as timestamped section headings when the video provides them.
 | --- | --- |
 | `activeTab` | Temporary access to the tab you invoked the extension on. The popup additionally checks that tab's origin and refuses to run anywhere but YouTube. |
 | `scripting` | Read the current player's caption-track metadata and download the selected track. |
+| `nativeMessaging` | Call the optional local Whisper helper when published captions are unavailable. |
+| `storage`, `alarms` | Persist local job status and poll progress after the popup closes. |
 | `https://*.youtube.com/*` | Declares YouTube as the extension's host scope. |
 | `https://*.youtube-nocookie.com/*` | The origin checks accept privacy-enhanced embeds, so the host scope declares them rather than relying on `activeTab` alone. |
 
-All processing happens in the current browser tab. Caption downloads are
+Published-caption processing happens in the current browser tab. Caption downloads are
 fetched only from `youtube.com` / `youtube-nocookie.com` hosts, enforced in
-`popup.js`. The extension has no telemetry and sends no data to third parties.
+`popup.js`. Fallback transcription runs on your PC; `yt-dlp` downloads the
+recording and Whisper transcribes it locally. Model weights download on first
+use. The extension has no telemetry or cloud transcription service.
 
 ## Tests
 
@@ -62,7 +73,8 @@ resource-timing behaviour remain unverified.
 
 ## Limitations
 
-* The video must expose at least one caption track.
+* Without captions, the local helper must be installed and `yt-dlp` must be
+  able to download the recording. Sign-in-only or bot-blocked videos can fail.
 * Translated tracks that YouTube generates only after a language is chosen
   in the player are not synthesized by this extension.
 * Live captions may be incomplete until the stream or premiere finishes.

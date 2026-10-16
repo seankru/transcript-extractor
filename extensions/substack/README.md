@@ -12,7 +12,9 @@ pre-signed `substackcdn.com/.../*.vtt` URL plus a `speaker_map` such as
 extension:
 
 1. Reads `window._preloads` (or, as a fallback, scans inline `<script>`
-   tags) for the VTT URL and the speaker map.
+   tags) for the primary recording's VTT URL and speaker map. Podcast
+   previews and sidebar posts are excluded, even when a preview shares
+   the current post's ID.
 2. Fetches the signed VTT directly from the Substack CDN — no extra
    auth, the URL carries its own `Expires=` query string.
 3. Rewrites `<v SPEAKER_NN>` tags to `<v Real Name>` using the map.
@@ -38,6 +40,8 @@ already loading the video from.
 
 ## Install (developer mode)
 
+From the repository root, run `pwsh .\scripts\prepare-extensions.ps1` first.
+
 1. Open `edge://extensions` (or `chrome://extensions`).
 2. Toggle **Developer mode**.
 3. Click **Load unpacked** and pick this folder
@@ -53,10 +57,34 @@ To produce a publishable zip, from the repo root:
 
 * Works only on Substack video posts that have a published transcript
   (the transcript panel must be visible on the post page).
+* Some posts publish captions only for a short podcast preview, not the
+  full recording. Preview captions are excluded; the extension falls back to
+  local Whisper for the full recording when the helper is installed.
 * The signed VTT URL has a TTL; if extraction fails with "URL may have
   expired", just reload the page and try again.
 * Audio-only podcast posts use a different rendering path and are not
-  yet supported.
+  always transcribed by Substack. Published captions on a primary podcast
+  upload are supported; preview-only captions are not used.
+
+## Local fallback and default format
+
+Markdown is the default; WebVTT remains selectable. Without a full published
+transcript, **Extract & Download** asks before downloading and starting local
+Whisper. The optional **Automatically transcribe when captions are unavailable**
+checkbox remembers opt-in for this extension; it defaults off. Set up the
+[native helper](../../tools/local-transcription/README.md) once. Jobs survive
+closing the popup and save into Downloads. The player must have loaded its
+full recording, and provider restrictions are not bypassed.
+
+In addition to `activeTab`/`scripting`, the extension uses `nativeMessaging`
+to contact the helper, `storage` for job status, and `alarms` for background
+status updates. Published-transcript extraction does not require the helper.
+
+## Regression tests
+
+```pwsh
+npm run test:substack
+```
 
 ## License
 

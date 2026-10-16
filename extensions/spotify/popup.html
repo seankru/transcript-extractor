@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Spotify Podcast Transcript Extractor</title>
+  <style>
+    body { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; width: 340px; padding: 12px; margin: 0; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    label { display: block; font-size: 11px; color: #666; margin-bottom: 4px; }
+    input[type=text] { width: 100%; box-sizing: border-box; padding: 5px 6px; margin-bottom: 10px; font: inherit; border: 1px solid #c8c8c8; border-radius: 3px; }
+    button { display: block; width: 100%; padding: 8px; font: inherit; font-weight: 600; cursor: pointer; background: #167d3d; color: white; border: 0; border-radius: 3px; }
+    button:disabled { background: #999; cursor: progress; }
+    #status { font-size: 12px; color: #333; margin-top: 10px; min-height: 36px; white-space: pre-wrap; line-height: 1.4; }
+    #status.error { color: #c50f1f; }
+    .meta { font-size: 11px; color: #666; margin-top: 10px; line-height: 1.4; }
+    .format-row { display: flex; gap: 12px; margin: 0 0 10px; }
+    .format-row label { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: #333; cursor: pointer; }
+    .format-row input { margin: 0; }
+  </style>
+</head>
+<body>
+  <h1>Spotify Podcast Transcript Extractor</h1>
+  <label for="filename">Filename (without extension; blank = episode title)</label>
+  <input type="text" id="filename" placeholder="auto">
+  <label>Format</label>
+  <div class="format-row">
+    <label><input type="radio" name="format" value="md" checked> Markdown (.md)</label>
+    <label><input type="radio" name="format" value="vtt"> WebVTT (.vtt)</label>
+  </div>
+  <label><input type="checkbox" id="auto-transcribe" disabled> Automatically transcribe when captions are unavailable</label>
+  <button id="extract">Extract &amp; Download</button>
+  <div id="transcription-confirmation" hidden>
+    <button id="transcription-confirm">Download &amp; Transcribe with Whisper</button>
+    <button id="transcription-cancel">Cancel</button>
+  </div>
+  <div id="status">Open a Spotify episode, then click Extract.</div>
+  <div class="meta">
+    Spotify's published transcript first, with timestamps and speaker labels.
+    Sign in to Spotify to access its Transcript tab. Without a usable transcript,
+    optional local Whisper uses the publisher's full public podcast audio.
+    It never uses Spotify preview clips or bypasses protected playback.
+    You are asked first unless automatic transcription is enabled.
+    Only the fallback requires the local helper.
+  </div>
+  <script src="transcription-client.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

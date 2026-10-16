@@ -35,15 +35,22 @@
   </select>
   <label>Format</label>
   <div class="format-row">
-    <label><input type="radio" name="format" value="vtt" checked> WebVTT (.vtt)</label>
-    <label><input type="radio" name="format" value="md"> Markdown (.md)</label>
+    <label><input type="radio" name="format" value="md" checked> Markdown (.md)</label>
+    <label><input type="radio" name="format" value="vtt"> WebVTT (.vtt)</label>
   </div>
+  <label><input type="checkbox" id="auto-transcribe" disabled> Automatically transcribe when captions are unavailable</label>
   <button id="extract" disabled>Extract &amp; Download</button>
+  <div id="transcription-confirmation" hidden>
+    <button id="transcription-confirm">Download &amp; Transcribe with Whisper</button>
+    <button id="transcription-cancel">Cancel</button>
+  </div>
   <div id="status">Open a YouTube video with captions.</div>
   <div class="meta">
-    Reads the timed-text track already exposed by YouTube for the current video.
-    Manual and auto-generated tracks are supported.
+    Published captions first (creator-provided preferred). Without captions,
+    local Whisper transcribes accessible recordings. You are asked first unless
+    automatic transcription is enabled. Requires the local helper.
   </div>
+  <script src="transcription-client.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

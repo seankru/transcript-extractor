@@ -24,7 +24,7 @@ extractBtn.addEventListener('click', async () => {
       return;
     }
 
-    const format = (document.querySelector('input[name="format"]:checked')?.value) === 'md' ? 'md' : 'vtt';
+    const format = (document.querySelector('input[name="format"]:checked')?.value) === 'vtt' ? 'vtt' : 'md';
 
     // Phase 0: if the user clicked from a calendar event peek, open its recap.
     // "View recap" lives in the outlook.office.com calendar iframe; clicking it
@@ -104,7 +104,10 @@ extractBtn.addEventListener('click', async () => {
       const withRows = results?.find(x => x?.result?.rowCount > 0)?.result;
       const anyErr = results?.find(x => x?.result?.error)?.result;
       const r = withRows || anyErr;
-      if (!r) {
+      if (!withRows && results?.some(x => x.result?.canTranscribe)) {
+        setStatus('No published transcript. Checking for a permitted recording download...');
+        await localTranscription.start('stream', tab, format, userName || contextName);
+      } else if (!r) {
         setStatus('No result returned from any frame.', true);
       } else {
         let msg = 'Error: ' + (r.error || 'Unknown failure');
@@ -118,7 +121,7 @@ extractBtn.addEventListener('click', async () => {
   } catch (err) {
     setStatus('Inject failed: ' + (err?.message || String(err)), true);
   }
-  extractBtn.disabled = false;
+  extractBtn.disabled = localTranscription.busy;
 });
 
 // ---------------------------------------------------------------------------
@@ -126,11 +129,12 @@ extractBtn.addEventListener('click', async () => {
 // function (no outer-scope references) because chrome.scripting serializes it.
 // ---------------------------------------------------------------------------
 async function extractAndDownload(suggestedName, format, contextName) {
-  // Normalise format: 'vtt' (default) or 'md'.
-  format = (format === 'md') ? 'md' : 'vtt';
+  format = (format === 'vtt') ? 'vtt' : 'md';
   contextName = contextName || null;
   function findRows() {
-    return Array.from(document.querySelectorAll('[class*="listItemWithSpeaker-"]'));
+    return Array.from(document.querySelectorAll(
+      '[class*="listItemWithSpeaker-"], [class*="listItemNoSpeaker-"]'
+    ));
   }
   function findScroller(node) {
     let n = node;
@@ -191,7 +195,7 @@ async function extractAndDownload(suggestedName, format, contextName) {
     // row of a speaker block. Continuation rows have no baseTimestamp, but
     // their baseEntry's aria-label preserves the spoken timestamp.
     let time = null;
-    const tsEl = row.querySelector('[class*="baseTimestamp-"]');
+    const tsEl = row.querySelector('[class*="baseTimestamp-"], [data-testid="timestamp-button"], [class*="leftColumnTimestamp-"]');
     if (tsEl) {
       const tsMatch = (tsEl.textContent || '').match(/(\d{1,2}:\d{2}(?::\d{2})?)/);
       if (tsMatch) time = tsMatch[1];
@@ -304,7 +308,9 @@ async function extractAndDownload(suggestedName, format, contextName) {
     }
   }
   if (!isTranscriptPaneOpen()) {
-    return { error: 'No transcript rows found. Open the transcript pane (\u2026 \u2192 Transcript). If the item is protected by a sensitivity/DLP label, the pane may stay blank until it is re-labeled to one that permits viewing.' };
+    const published = await tryFetchTranscriptViaApi();
+    if (published) return finishFetched(published);
+    return { canTranscribe: true, error: 'No published transcript rows or accessible transcript resource found. Local transcription requires a recording with downloading permitted.' };
   }
 
   // Capture the state of the authoritative download path up front, before we
@@ -845,6 +851,10 @@ async function extractAndDownload(suggestedName, format, contextName) {
     else if (lastTime) c.time = lastTime;
   }
   const cuesForVtt = cues.filter(c => c.time && parseTime(c.time) !== null);
+  if (!cuesForVtt.length) {
+    return { error: 'Transcript rows were found, but no readable timestamps could be extracted.',
+      rowCount: seen.size };
+  }
 
   let vtt = 'WEBVTT\n\n';
   for (let i = 0; i < cuesForVtt.length; i++) {

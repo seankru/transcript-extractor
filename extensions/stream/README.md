@@ -13,6 +13,8 @@ iframe, so the same selectors and download path apply there.
 
 ## Install (unpacked)
 
+Run `pwsh .\scripts\prepare-extensions.ps1` from the repository root first.
+
 1. Open `edge://extensions` (or `chrome://extensions`).
 2. Toggle **Developer mode** on (top-right corner).
 3. Click **Load unpacked** and pick this folder
@@ -26,7 +28,15 @@ To produce a publishable zip, from the repo root:
 ./scripts/build.ps1 -Name stream
 ```
 
-No external dependencies, no service worker, no remote calls.
+Published transcripts need no external helper. A service worker integrates the
+optional [local Whisper helper](../../tools/local-transcription/README.md) for
+recordings without transcripts. Markdown is selected by default; WebVTT remains
+available. `nativeMessaging`, `storage`, and `alarms` support durable local jobs.
+Without published captions, confirmation is required before downloading and
+transcribing. **Automatically transcribe when captions are unavailable** opts
+this extension out of that prompt; the saved checkbox defaults off.
+The fallback requires an enabled recording-download link and does not bypass
+organizational export restrictions, DRM, or sign-in.
 
 ## Use
 

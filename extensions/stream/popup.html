@@ -30,15 +30,23 @@
   <input type="text" id="filename" placeholder="auto">
   <label>Format</label>
   <div class="format-row">
-    <label><input type="radio" name="format" value="vtt" checked> WebVTT (.vtt)</label>
-    <label><input type="radio" name="format" value="md"> Markdown (.md)</label>
+    <label><input type="radio" name="format" value="md" checked> Markdown (.md)</label>
+    <label><input type="radio" name="format" value="vtt"> WebVTT (.vtt)</label>
   </div>
+  <label><input type="checkbox" id="auto-transcribe" disabled> Automatically transcribe when captions are unavailable</label>
   <button id="extract">Extract &amp; Download</button>
+  <div id="transcription-confirmation" hidden>
+    <button id="transcription-confirm">Download &amp; Transcribe with Whisper</button>
+    <button id="transcription-cancel">Cancel</button>
+  </div>
   <div id="status">Click Extract while you're on the Stream tab. The extension will open the transcript pane if it's closed.</div>
   <div class="meta">
-    Keep this popup open and stay on the tab while it runs. The fast path uses
-    Stream's own transcript URL when available, with a DOM scrape fallback otherwise.
+    Published transcripts need no local helper or recording download.
+    Keep this popup open and stay on the tab during extraction.
+    Only the optional Whisper fallback requires the local helper and a permitted
+    recording download. You are asked first unless automatic transcription is enabled.
   </div>
+  <script src="transcription-client.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

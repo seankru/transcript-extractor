@@ -18,6 +18,7 @@ run, cached under your user profile.
 | A `.vtt` download button | No — you already have captions, just click it |
 | "TTS-narrated audio (no transcript)" | No — the post body is already the transcript |
 | "No transcript was found" but the post has an inline `<video>` | **Yes** |
+| "captions only for this post's short podcast preview, not the full recording" | **Yes** |
 
 ---
 

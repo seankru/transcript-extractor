@@ -3,7 +3,8 @@
   "name": "YouTube Caption Extractor",
   "version": "0.1.0",
   "description": "Save available YouTube captions as WebVTT or Markdown.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "nativeMessaging", "storage", "alarms"],
+  "background": { "service_worker": "transcription-worker.js" },
   "host_permissions": [
     "https://*.youtube.com/*",
     "https://*.youtube-nocookie.com/*"

@@ -27,6 +27,7 @@ runs are instant to load.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -66,7 +67,7 @@ def write_md(segments: list, info: dict, out_path: Path, source_name: str) -> No
 
     frontmatter = [
         "---",
-        f'source: "{source_name}"',
+        f"source: {json.dumps(source_name, ensure_ascii=False)}",
         f"duration_seconds: {duration:.1f}",
         f'language: "{language}"',
         f"language_probability: {language_probability:.3f}",
@@ -160,6 +161,8 @@ def transcribe(
     output_dir: Path | None,
     write_vtt_flag: bool,
     write_md_flag: bool,
+    progress=None,
+    source_name: str | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Run transcription. Returns (vtt_path, md_path), either of which may be None."""
     try:
@@ -194,6 +197,8 @@ def transcribe(
         vad_filter=True,
         beam_size=5,
     )
+    if progress:
+        progress(0, info.duration)
 
     # Materialise the generator and stream progress to stderr.
     segments: list[dict] = []
@@ -208,7 +213,11 @@ def transcribe(
         # One dot per segment so the user knows it's alive.
         sys.stderr.write(".")
         sys.stderr.flush()
+        if progress:
+            progress(seg.end, info.duration)
     sys.stderr.write("\n")
+    if not segments:
+        raise ValueError("Whisper found no speech in this recording.")
 
     elapsed = time.time() - t1
     duration = info.duration
@@ -233,7 +242,7 @@ def transcribe(
         write_vtt(segments, vtt_path)
     if write_md_flag:
         md_path = out_dir / f"{stem}.md"
-        write_md(segments, info_dict, md_path, input_path.name)
+        write_md(segments, info_dict, md_path, source_name or input_path.name)
 
     return vtt_path, md_path
 

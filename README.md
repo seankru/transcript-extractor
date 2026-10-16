@@ -1,8 +1,9 @@
 # Transcript Extractors
 
 A small family of Edge / Chrome extensions (MV3) that save the
-transcript of whatever you're watching to a clean `.vtt` or `.md` file
-in your Downloads folder, with speaker names preserved.
+transcript of whatever you're watching to a clean `.md` (default) or `.vtt`
+file in Downloads. Published transcripts preserve available speaker names;
+recordings without transcripts can be transcribed on-device with Whisper.
 
 Each extension is independent — its own toolbar button, its own
 permissions scoped to a single host, its own marketplace listing. The
@@ -28,10 +29,9 @@ Planned sibling: Zoom (cloud-recording VTT export). It will appear under
   one workflow.
 * Each one ships independently. A regression on Substack does not
   block a Stream update.
-* Once 3+ extensions exist and we feel real duplication, we can lift
-  shared bits (VTT-to-Markdown converter, save-to-Downloads helper)
-  into `extensions/_shared/` and import. Until then, each extension's
-  `popup.js` is self-contained.
+* Caption extraction stays site-specific. The native Whisper client and
+  background job worker are shared under `extensions/_shared/`, copied into
+  each independently installable package by the preparation/build scripts.
 
 ## Repo layout
 
@@ -57,8 +57,8 @@ LICENSE                # MIT
 ./scripts/build.ps1 -Name youtube    # → dist/youtube-transcript-extractor-v0.1.0.zip
 ```
 
-The build script zips only the files the browser actually loads
-(`manifest.json`, `popup.html`, `popup.js`, `icons/`) — no README,
+The build script prepares the shared runtime and zips only browser files
+(`manifest.json`, `popup.html`, JavaScript, `icons/`) — no README,
 no screenshots, no test scaffolding.
 
 ## Regenerate icons
@@ -76,15 +76,51 @@ three white transcript bars.
 
 For any extension in the family:
 
+Run `pwsh .\scripts\prepare-extensions.ps1` from the repository root first.
+Repeat after changing shared JavaScript, then reload the extensions.
+
 1. Open `edge://extensions` (or `chrome://extensions`).
 2. Toggle **Developer mode**.
 3. Click **Load unpacked** and pick the appropriate
    `extensions/<name>/` folder.
 
+## One-click local transcription (Windows)
+
+The button prefers published transcripts/captions. Markdown is selected by
+default; WebVTT is still available. If published captions are absent (including
+Substack preview-only captions), the extension asks before downloading the
+recording and starting local Whisper. Enable **Automatically transcribe when
+captions are unavailable** to skip this prompt. The setting defaults off and
+is saved separately for each extension.
+
+Install the helper once, using the IDs displayed at `edge://extensions` or
+`chrome://extensions`:
+
+```pwsh
+.\tools\local-transcription\install.ps1 -ExtensionId @('YOUR_32_CHARACTER_EXTENSION_ID')
+# Multiple extensions can share the helper:
+.\tools\local-transcription\install.ps1 -ExtensionId @('FIRST_ID', 'SECOND_ID', 'THIRD_ID')
+# Chrome: add -Browser Chrome. Default model is small; -Model base is faster.
+```
+
+Python 3.10+ is required. The installer restores `faster-whisper` and `yt-dlp`
+when missing, installs a native-messaging host under
+`%LOCALAPPDATA%\TranscriptExtractor`, and registers it for this Windows user.
+Reload each extension afterward. No browser debugging connection is needed.
+See [the helper README](tools/local-transcription/README.md) for behavior,
+limits, privacy, testing, and uninstall instructions.
+
+Generated transcripts run independently of the popup: close it while Whisper
+works, then reopen for progress. The badge shows `...`, `Done`, or `!`.
+Files are saved to the Windows Downloads known folder without overwriting
+existing files. The first run downloads model weights and can take longer.
+Generated transcripts do not identify speakers and can contain recognition errors.
+
 ## Privacy
 
-No telemetry, no third-party network calls. Each extension only reads
-the page you're actively viewing, after you click its toolbar button.
+No telemetry or cloud transcription. Published captions are fetched from their
+provider; fallback audio is downloaded from the recording's provider/CDN and
+transcribed locally. Model weights are downloaded on first use.
 See [PRIVACY.md](PRIVACY.md).
 
 ## License

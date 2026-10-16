@@ -13,6 +13,7 @@ param(
 )
 
 $root      = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'prepare-extensions.ps1')
 $extDir    = Join-Path $root "extensions\$Name"
 $manifest  = Join-Path $extDir 'manifest.json'
 
@@ -32,7 +33,7 @@ if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
 # Zip just the extension's own contents (NOT the README, NOT the screenshots/
 # folder — those aren't part of the loadable extension surface).
-$included = @('manifest.json', 'popup.html', 'popup.js', 'icons')
+$included = @('manifest.json', 'popup.html', 'popup.js', 'transcription-client.js', 'transcription-worker.js', 'icons')
 $paths = $included |
     ForEach-Object { Join-Path $extDir $_ } |
     Where-Object   { Test-Path $_ }
