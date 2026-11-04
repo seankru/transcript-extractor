@@ -13,6 +13,8 @@ iframe, so the same selectors and download path apply there.
 
 ## Install (unpacked)
 
+Run `pwsh .\scripts\prepare-extensions.ps1` from the repository root first.
+
 1. Open `edge://extensions` (or `chrome://extensions`).
 2. Toggle **Developer mode** on (top-right corner).
 3. Click **Load unpacked** and pick this folder
@@ -26,7 +28,15 @@ To produce a publishable zip, from the repo root:
 ./scripts/build.ps1 -Name stream
 ```
 
-No external dependencies, no service worker, no remote calls.
+Published transcripts need no external helper. A service worker integrates the
+optional [local Whisper helper](../../tools/local-transcription/README.md) for
+recordings without transcripts. Markdown is selected by default; WebVTT remains
+available. `nativeMessaging`, `storage`, and `alarms` support durable local jobs.
+Without published captions, confirmation is required before downloading and
+transcribing. **Automatically transcribe when captions are unavailable** opts
+this extension out of that prompt; the saved checkbox defaults off.
+The fallback requires an enabled recording-download link and does not bypass
+organizational export restrictions, DRM, or sign-in.
 
 ## Use
 
@@ -58,6 +68,24 @@ One click, from **either** starting point — the extension does the rest
 This works whether or not the meeting was recorded — a transcribed-only
 meeting and a recorded meeting are both extracted straight from Teams
 (no "Open in Stream" detour).
+
+### Transcript language / version
+
+When SharePoint's recording metadata exposes multiple visible transcripts,
+the popup lists their names/language tags and marks the platform default.
+Choose an entry to fetch that exact transcript as Markdown or WebVTT, with
+speakers retained where available. Explicit selection is bound to the recording
+and source frame; it never falls through to a different pane, native download,
+or Whisper if that transcript cannot be retrieved.
+Saved filenames append the selected transcript's display name or language tag,
+for example `My meeting-fr-FR.md`, including with a custom basename.
+
+**Automatic** preserves the existing platform-default/current-pane behavior,
+including Teams recaps and legacy surfaces that do not expose a transcript list.
+If you opened the extension before the recording's metadata loaded, open the
+transcript pane and reopen the extension to discover available variants.
+Stream metadata does not reliably distinguish publisher-supplied from generated
+transcripts, so choices are not labelled as publisher-supplied without evidence.
 
 Blank filename = a descriptive default built from the meeting title and
 instance date/time, e.g. `Sean _ Blake 1_1 - 20260702_1305 Recap.vtt`

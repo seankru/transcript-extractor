@@ -7,7 +7,7 @@
     body { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; width: 340px; padding: 12px; margin: 0; }
     h1 { font-size: 14px; margin: 0 0 8px; }
     label { display: block; font-size: 11px; color: #666; margin-bottom: 4px; }
-    input[type=text] {
+    input[type=text], select {
       width: 100%; box-sizing: border-box; padding: 5px 6px; margin-bottom: 10px;
       font-family: inherit; font-size: 12px; border: 1px solid #c8c8c8; border-radius: 3px;
     }
@@ -28,17 +28,28 @@
   <h1>Substack Transcript Extractor</h1>
   <label for="filename">Filename (without extension; blank = page title)</label>
   <input type="text" id="filename" placeholder="auto">
+  <label for="track">Transcript language / version</label>
+  <select id="track" disabled>
+    <option value="">Automatic - published transcript (format default)</option>
+  </select>
   <label>Format</label>
   <div class="format-row">
-    <label><input type="radio" name="format" value="vtt" checked> WebVTT (.vtt)</label>
-    <label><input type="radio" name="format" value="md"> Markdown (.md)</label>
+    <label><input type="radio" name="format" value="md" checked> Markdown (.md)</label>
+    <label><input type="radio" name="format" value="vtt"> WebVTT (.vtt)</label>
   </div>
-  <button id="extract">Extract &amp; Download</button>
-  <div id="status">Open a Substack video post that has a transcript, then click Extract.</div>
+  <label><input type="checkbox" id="auto-transcribe" disabled> Automatically transcribe when captions are unavailable</label>
+  <button id="extract" disabled>Extract &amp; Download</button>
+  <div id="transcription-confirmation" hidden>
+    <button id="transcription-confirm">Download &amp; Transcribe with Whisper</button>
+    <button id="transcription-cancel">Cancel</button>
+  </div>
+  <div id="status">Click Extract to save published captions or choose local transcription.</div>
   <div class="meta">
-    Reads Substack's embedded transcript metadata directly from the page —
-    no DOM scraping, no extra API calls beyond the signed CDN URL.
+    Published transcripts first. If unavailable, you are asked before downloading
+    and transcribing locally unless automatic transcription is enabled.
+    Requires the one-time local helper setup.
   </div>
+  <script src="transcription-client.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -6,6 +6,41 @@
 const statusEl = document.getElementById('status');
 const filenameEl = document.getElementById('filename');
 const extractBtn = document.getElementById('extract');
+const trackEl = document.getElementById('track');
+let transcriptChoices = [];
+let sourceTabId = null;
+
+async function loadTranscriptChoices() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('No active tab.');
+    sourceTabId = tab.id;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true }, func: extractAndDownload,
+      args: [null, 'md', null, { discover: true }]
+    });
+    const failure = results?.find(frame => frame.result?.error);
+    for (const frame of results || []) {
+      for (const track of frame.result?.tracks || []) {
+        const choice = { ...track, frameId: frame.frameId, metadataUrl: frame.result.metadataUrl };
+        const option = document.createElement('option');
+        option.value = String(transcriptChoices.length);
+        option.textContent = `${track.label}${frame.frameId ? ' - embedded recording' : ''}`;
+        transcriptChoices.push(choice);
+        trackEl.appendChild(option);
+      }
+    }
+    trackEl.disabled = !transcriptChoices.length;
+    if (failure && !transcriptChoices.length) throw new Error(failure.result.error);
+    if (transcriptChoices.length > 1) setStatus('Choose the transcript language/version, or keep the platform default.');
+  } catch (error) {
+    setStatus('Transcript choices unavailable: ' + error.message + ' You can retry with Extract.', true);
+  } finally {
+    await localTranscription.restore();
+    extractBtn.disabled = localTranscription.busy;
+    trackEl.disabled = localTranscription.busy || !transcriptChoices.length;
+  }
+}
 
 function setStatus(text, isError) {
   statusEl.textContent = text;
@@ -15,6 +50,7 @@ function setStatus(text, isError) {
 extractBtn.addEventListener('click', async () => {
   setStatus('Extracting\u2026 keep this popup open and stay on the tab.');
   extractBtn.disabled = true;
+  trackEl.disabled = true;
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -24,41 +60,47 @@ extractBtn.addEventListener('click', async () => {
       return;
     }
 
-    const format = (document.querySelector('input[name="format"]:checked')?.value) === 'md' ? 'md' : 'vtt';
+    const format = (document.querySelector('input[name="format"]:checked')?.value) === 'vtt' ? 'vtt' : 'md';
+    const selected = trackEl.value === '' ? null : transcriptChoices[Number(trackEl.value)];
+    if (selected && tab.id !== sourceTabId) throw new Error('The active tab changed. Reopen the extension to choose its transcript.');
 
     // Phase 0: if the user clicked from a calendar event peek, open its recap.
     // "View recap" lives in the outlook.office.com calendar iframe; clicking it
     // navigates the Teams frame to the correct occurrence.
     let openedFromEvent = false;
-    try {
-      const r0 = await chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        func: clickViewRecap
-      });
-      openedFromEvent = !!r0?.some(x => x?.result === true);
-    } catch { /* no calendar frame / not permitted; continue */ }
+    if (!selected) {
+      try {
+        const r0 = await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          func: clickViewRecap
+        });
+        openedFromEvent = !!r0?.some(x => x?.result === true);
+      } catch { /* no calendar frame / not permitted; continue */ }
+    }
 
     // Phase 1: on Teams, open the meeting's Recap → Transcript for the user and
     // read the meeting title + date/time (for a descriptive filename). No-op on
     // non-Teams pages and inside the transcript iframe.
     let teamsCtx = null;
-    try {
-      const prep = await chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        func: prepareTeamsContext,
-        args: [openedFromEvent]
-      });
-      teamsCtx = prep?.map(x => x?.result).find(r => r && r.isTeams) || null;
-    } catch { /* injection blocked or non-Teams; continue to extraction */ }
+    if (!selected) {
+      try {
+        const prep = await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          func: prepareTeamsContext,
+          args: [openedFromEvent]
+        });
+        teamsCtx = prep?.map(x => x?.result).find(r => r && r.isTeams) || null;
+      } catch { /* injection blocked or non-Teams; continue to extraction */ }
+    }
 
     const userName = filenameEl.value.trim() || null;
     const contextName = userName ? null : buildRecapName(teamsCtx);
 
     // Phase 2: extract from whichever frame actually holds the transcript.
     const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id, allFrames: true },
+      target: selected ? { tabId: tab.id, frameIds: [selected.frameId] } : { tabId: tab.id, allFrames: true },
       func: extractAndDownload,
-      args: [userName, format, contextName]
+      args: [userName, format, contextName, selected]
     });
 
     // Multiple frames may run; pick the first successful extraction.
@@ -94,6 +136,7 @@ extractBtn.addEventListener('click', async () => {
       } else {
         setStatus(
           modeLine +
+          (success.languageTag ? `Transcript language: ${success.languageTag}.\n` : '') +
           `Extracted ${success.cueCount} cues (${(success.byteCount / 1024).toFixed(1)} KB).\n` +
           `Covered up to ${success.coverage}.\n` +
           `Saved to Downloads as:\n${success.filename}`
@@ -104,7 +147,10 @@ extractBtn.addEventListener('click', async () => {
       const withRows = results?.find(x => x?.result?.rowCount > 0)?.result;
       const anyErr = results?.find(x => x?.result?.error)?.result;
       const r = withRows || anyErr;
-      if (!r) {
+      if (!selected && !withRows && results?.some(x => x.result?.canTranscribe)) {
+        setStatus('No published transcript. Checking for a permitted recording download...');
+        await localTranscription.start('stream', tab, format, userName || contextName);
+      } else if (!r) {
         setStatus('No result returned from any frame.', true);
       } else {
         let msg = 'Error: ' + (r.error || 'Unknown failure');
@@ -118,19 +164,47 @@ extractBtn.addEventListener('click', async () => {
   } catch (err) {
     setStatus('Inject failed: ' + (err?.message || String(err)), true);
   }
-  extractBtn.disabled = false;
+  extractBtn.disabled = localTranscription.busy;
+  trackEl.disabled = localTranscription.busy || !transcriptChoices.length;
 });
+
+loadTranscriptChoices();
 
 // ---------------------------------------------------------------------------
 // Injected into the active tab's content world. Must be a single self-contained
 // function (no outer-scope references) because chrome.scripting serializes it.
 // ---------------------------------------------------------------------------
-async function extractAndDownload(suggestedName, format, contextName) {
-  // Normalise format: 'vtt' (default) or 'md'.
-  format = (format === 'md') ? 'md' : 'vtt';
+async function extractAndDownload(suggestedName, format, contextName, selection) {
+  format = (format === 'vtt') ? 'vtt' : 'md';
   contextName = contextName || null;
+  if (selection) {
+    try {
+      const metadata = await loadTranscriptMetadata();
+      const tracks = (metadata?.list || []).filter(t => typeof t?.temporaryDownloadUrl === 'string' && t.isVisible !== false)
+        .map((t, index) => ({
+          id: `${t.id || t.temporaryDownloadUrl.split('?')[0]}:${t.languageTag || 'und'}`,
+          label: `${t.displayName || t.languageTag || 'Unspecified language'}${t.isDefault ? ' - platform default' : ''} (${index + 1})`,
+          transcript: t
+        }));
+      if (selection.discover) {
+        return { metadataUrl: metadata?.url || null, tracks: tracks.map(({ transcript, ...track }) => track) };
+      }
+      const matches = tracks.filter(t => t.id === selection.id);
+      if (matches.length !== 1 || selection.metadataUrl !== metadata?.url) {
+        return { error: 'The recording or selected transcript changed. Reopen the extension and choose it again.' };
+      }
+      const fetched = await fetchMetadataTranscript(matches[0].transcript);
+      if (!fetched) return { error: 'The selected transcript could not be retrieved. No other language or local transcription was substituted.' };
+      fetched.transcriptChoice = matches[0].transcript.displayName || matches[0].transcript.languageTag || 'Transcript';
+      return finishFetched(fetched);
+    } catch (error) {
+      return { error: 'Could not load transcript choices: ' + error.message };
+    }
+  }
   function findRows() {
-    return Array.from(document.querySelectorAll('[class*="listItemWithSpeaker-"]'));
+    return Array.from(document.querySelectorAll(
+      '[class*="listItemWithSpeaker-"], [class*="listItemNoSpeaker-"]'
+    ));
   }
   function findScroller(node) {
     let n = node;
@@ -191,7 +265,7 @@ async function extractAndDownload(suggestedName, format, contextName) {
     // row of a speaker block. Continuation rows have no baseTimestamp, but
     // their baseEntry's aria-label preserves the spoken timestamp.
     let time = null;
-    const tsEl = row.querySelector('[class*="baseTimestamp-"]');
+    const tsEl = row.querySelector('[class*="baseTimestamp-"], [data-testid="timestamp-button"], [class*="leftColumnTimestamp-"]');
     if (tsEl) {
       const tsMatch = (tsEl.textContent || '').match(/(\d{1,2}:\d{2}(?::\d{2})?)/);
       if (tsMatch) time = tsMatch[1];
@@ -304,7 +378,9 @@ async function extractAndDownload(suggestedName, format, contextName) {
     }
   }
   if (!isTranscriptPaneOpen()) {
-    return { error: 'No transcript rows found. Open the transcript pane (\u2026 \u2192 Transcript). If the item is protected by a sensitivity/DLP label, the pane may stay blank until it is re-labeled to one that permits viewing.' };
+    const published = await tryFetchTranscriptViaApi();
+    if (published) return finishFetched(published);
+    return { canTranscribe: true, error: 'No published transcript rows or accessible transcript resource found. Local transcription requires a recording with downloading permitted.' };
   }
 
   // Capture the state of the authoritative download path up front, before we
@@ -457,6 +533,41 @@ async function extractAndDownload(suggestedName, format, contextName) {
   // page already loads when the transcript pane opens — we just refetch it
   // from the page context using the user's existing cookies.
   // -----------------------------------------------------------------------
+  async function loadTranscriptMetadata() {
+    const entries = performance.getEntriesByType('resource') || [];
+    const url = entries.map(e => e.name || '').reverse()
+      .find(u => /\/_api\/v2\.1\/drives\/[^/]+\/items\/[^?]+\?[^"]*select=media(%2[Ff]|\/)transcripts/i.test(u));
+    if (!url) return null;
+    const response = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error(`Stream transcript metadata returned HTTP ${response.status}.`);
+    const metadata = await response.json();
+    const list = metadata?.media?.transcripts;
+    if (list != null && !Array.isArray(list)) throw new Error('Stream returned an unreadable transcript list.');
+    return { url, list: list || [] };
+  }
+
+  async function fetchMetadataTranscript(t) {
+    try {
+      const url = new URL(t.temporaryDownloadUrl);
+      url.searchParams.set('format', 'json');
+      const response = await fetch(url.toString(), { credentials: 'include', signal: AbortSignal.timeout(15000) });
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data?.entries) && data.entries.length) {
+          return { kind: 'json', data, url: url.toString(), languageTag: t.languageTag, via: 'metadata-json' };
+        }
+      }
+    } catch { /* The same selected track may still be available as VTT. */ }
+    const response = await fetch(t.temporaryDownloadUrl, { credentials: 'include', signal: AbortSignal.timeout(15000) });
+    if (response.ok) {
+      const body = await response.text();
+      if (/^\uFEFF?WEBVTT/.test(body)) {
+        return { kind: 'vtt', body, url: t.temporaryDownloadUrl, languageTag: t.languageTag, via: 'metadata-vtt' };
+      }
+    }
+    return null;
+  }
+
   async function tryFetchTranscriptViaApi() {
     let entries = [];
     try { entries = performance.getEntriesByType('resource') || []; } catch {}
@@ -497,47 +608,18 @@ async function extractAndDownload(suggestedName, format, contextName) {
     // The JSON variant is the preferred source because it carries the
     // speaker labels that the VTT projection drops. We fall back to the
     // plain VTT if JSON is somehow blocked.
-    const metaUrl = entries
-      .map(e => e.name || '')
-      .find(u => /\/_api\/v2\.1\/drives\/[^/]+\/items\/[^?]+\?[^"]*select=media(%2[Ff]|\/)transcripts/i.test(u));
-    if (metaUrl) {
-      try {
-        const metaResp = await fetch(metaUrl, { credentials: 'include' });
-        if (metaResp.ok) {
-          const meta = await metaResp.json();
-          const list = (meta && meta.media && meta.media.transcripts) || [];
-          const t =
-            list.find(x => x && x.isDefault && x.isVisible && x.temporaryDownloadUrl) ||
-            list.find(x => x && x.isVisible && x.temporaryDownloadUrl) ||
-            list.find(x => x && x.temporaryDownloadUrl);
-          if (t && t.temporaryDownloadUrl) {
-            // Preferred: JSON variant (speakered).
-            try {
-              const ju = new URL(t.temporaryDownloadUrl);
-              ju.searchParams.set('format', 'json');
-              const jr = await fetch(ju.toString(), { credentials: 'include' });
-              if (jr.ok) {
-                const data = await jr.json();
-                if (data && Array.isArray(data.entries) && data.entries.length > 0) {
-                  return { kind: 'json', data, url: ju.toString(), languageTag: t.languageTag, via: 'metadata-json' };
-                }
-              }
-            } catch { /* fall through to raw VTT */ }
-
-            // Fallback: raw VTT (speaker-less for Stream-hosted transcripts).
-            try {
-              const vr = await fetch(t.temporaryDownloadUrl, { credentials: 'include' });
-              if (vr.ok) {
-                const body = await vr.text();
-                if (typeof body === 'string' && /^\uFEFF?WEBVTT/.test(body)) {
-                  return { kind: 'vtt', body, url: t.temporaryDownloadUrl, languageTag: t.languageTag, via: 'metadata-vtt' };
-                }
-              }
-            } catch { /* nothing more to try at this URL */ }
-          }
-        }
-      } catch { /* fall through to legacy resource probing */ }
-    }
+    try {
+      const metadata = await loadTranscriptMetadata();
+      const list = metadata?.list || [];
+      const t =
+        list.find(x => x && x.isDefault && x.isVisible && x.temporaryDownloadUrl) ||
+        list.find(x => x && x.isVisible && x.temporaryDownloadUrl) ||
+        list.find(x => x && x.temporaryDownloadUrl);
+      if (t) {
+        const fetched = await fetchMetadataTranscript(t);
+        if (fetched) return fetched;
+      }
+    } catch { /* fall through to legacy resource probing */ }
 
     // -----------------------------------------------------------------
     // Legacy path: probe any resource the page has already loaded that
@@ -679,7 +761,7 @@ async function extractAndDownload(suggestedName, format, contextName) {
     return out.join('\n');
   }
 
-  function saveFile(body, baseName, ext, mime, contextName) {
+  function saveFile(body, baseName, ext, mime, contextName, transcriptChoice) {
     const extension = (ext || '.vtt').toLowerCase();
     const mimeType = mime || (extension === '.md' ? 'text/markdown' : 'text/vtt');
     let filename = baseName;
@@ -697,6 +779,8 @@ async function extractAndDownload(suggestedName, format, contextName) {
     }
     // Strip any existing recognized extension so we control it.
     filename = filename.replace(/\.(vtt|md|txt)$/i, '');
+    const choice = String(transcriptChoice || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
+    if (choice) filename = filename.slice(0, Math.max(1, 180 - choice.length)) + '-' + choice;
     filename += extension;
     const blob = new Blob([body], { type: mimeType });
     const u = URL.createObjectURL(blob);
@@ -720,11 +804,12 @@ async function extractAndDownload(suggestedName, format, contextName) {
       payload = (format === 'md') ? vttToMarkdown(fetched.body) : fetched.body;
       ext = (format === 'md') ? '.md' : '.vtt';
     }
-    const filename = saveFile(payload, suggestedName, ext, undefined, contextName);
+    const filename = saveFile(payload, suggestedName, ext, undefined, contextName, fetched.transcriptChoice);
     return {
       mode: 'fetched',
       format,
       via: fetched.via,
+      languageTag: fetched.languageTag,
       sourceUrl: fetched.url,
       cueCount,
       byteCount: payload.length,
@@ -845,6 +930,10 @@ async function extractAndDownload(suggestedName, format, contextName) {
     else if (lastTime) c.time = lastTime;
   }
   const cuesForVtt = cues.filter(c => c.time && parseTime(c.time) !== null);
+  if (!cuesForVtt.length) {
+    return { error: 'Transcript rows were found, but no readable timestamps could be extracted.',
+      rowCount: seen.size };
+  }
 
   let vtt = 'WEBVTT\n\n';
   for (let i = 0; i < cuesForVtt.length; i++) {

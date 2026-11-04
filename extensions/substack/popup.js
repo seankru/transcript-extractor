@@ -15,6 +15,38 @@
 const statusEl = document.getElementById('status');
 const filenameEl = document.getElementById('filename');
 const extractBtn = document.getElementById('extract');
+const trackEl = document.getElementById('track');
+let transcriptChoices = null;
+let sourceTabId = null;
+
+async function loadTranscriptChoices() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('No active tab.');
+    sourceTabId = tab.id;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, world: 'MAIN', func: extractAndDownload,
+      args: [null, 'md', { discover: true }]
+    });
+    const result = results?.[0]?.result;
+    if (result?.error) throw new Error(result.error);
+    transcriptChoices = result;
+    for (const track of result.tracks) {
+      const option = document.createElement('option');
+      option.value = track.id;
+      option.textContent = track.label;
+      trackEl.appendChild(option);
+    }
+    trackEl.disabled = !result.tracks.length;
+    if (result.tracks.length > 1) setStatus('Choose the transcript language you want to extract.');
+  } catch (error) {
+    setStatus('Transcript choices unavailable: ' + error.message + ' You can retry with Extract.', true);
+  } finally {
+    await localTranscription.restore();
+    extractBtn.disabled = localTranscription.busy;
+    trackEl.disabled = localTranscription.busy || !transcriptChoices?.tracks.length;
+  }
+}
 
 function setStatus(text, isError) {
   statusEl.textContent = text;
@@ -24,6 +56,7 @@ function setStatus(text, isError) {
 extractBtn.addEventListener('click', async () => {
   setStatus('Extracting\u2026 keep this popup open.');
   extractBtn.disabled = true;
+  trackEl.disabled = true;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) {
@@ -32,7 +65,9 @@ extractBtn.addEventListener('click', async () => {
       return;
     }
 
-    const format = (document.querySelector('input[name="format"]:checked')?.value) === 'md' ? 'md' : 'vtt';
+    const format = (document.querySelector('input[name="format"]:checked')?.value) === 'vtt' ? 'vtt' : 'md';
+    const selected = transcriptChoices?.tracks.find(track => track.id === trackEl.value);
+    if (selected && tab.id !== sourceTabId) throw new Error('The active tab changed. Reopen the extension to choose its transcript.');
 
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -44,7 +79,8 @@ extractBtn.addEventListener('click', async () => {
       // serializations.
       world: 'MAIN',
       func: extractAndDownload,
-      args: [filenameEl.value.trim() || null, format]
+      args: [filenameEl.value.trim() || null, format,
+        selected ? { postId: transcriptChoices.postId, track: selected } : null]
     });
 
     const success = results?.find(x => x?.result && !x.result.error && (x.result.cueCount > 0 || x.result.paragraphCount > 0))?.result;
@@ -65,26 +101,34 @@ extractBtn.addEventListener('click', async () => {
         ? `Rendered ${success.paragraphCount} paragraph${success.paragraphCount === 1 ? '' : 's'} from ${success.sentenceCount} sentences (${(success.byteCount / 1024).toFixed(1)} KB).`
         : `Extracted ${success.cueCount} cues (${(success.byteCount / 1024).toFixed(1)} KB).`;
       setStatus(
-        `Source: ${sourceLabel}\n${speakerLine}` +
+        `Source: ${sourceLabel}${success.language ? `\nTranscript language: ${success.language}.` : ''}\n${speakerLine}` +
         `${countLine}\n` +
         `Saved to Downloads as:\n${success.filename}`
       );
     } else {
       const err = results?.find(x => x?.result?.error)?.result;
-      setStatus('Error: ' + (err?.error || 'Unknown failure'), true);
+      if (err?.canTranscribe && !selected) {
+        setStatus('No full published transcript. Checking local transcription preference...');
+        await localTranscription.start('substack', tab, format, filenameEl.value.trim());
+      } else {
+        setStatus('Error: ' + (err?.error || 'Unknown failure'), true);
+      }
     }
   } catch (err) {
     setStatus('Inject failed: ' + (err?.message || String(err)), true);
   }
-  extractBtn.disabled = false;
+  extractBtn.disabled = localTranscription.busy;
+  trackEl.disabled = localTranscription.busy || !transcriptChoices?.tracks.length;
 });
+
+loadTranscriptChoices();
 
 // ---------------------------------------------------------------------------
 // Injected into the active tab's content world. Must be self-contained
 // because chrome.scripting serializes it across the boundary.
 // ---------------------------------------------------------------------------
-async function extractAndDownload(suggestedName, format) {
-  format = (format === 'md') ? 'md' : 'vtt';
+async function extractAndDownload(suggestedName, format, selection) {
+  format = (format === 'vtt') ? 'vtt' : 'md';
 
   // ── Step 1: locate the Substack preloads blob ──────────────────────────
   // Substack serialises page metadata into either window._preloads (a JSON
@@ -159,11 +203,32 @@ async function extractAndDownload(suggestedName, format) {
     return { error: 'Could not determine the current post id from page data.' };
   }
 
-  // Scoped blob: prefer the structured current-post object; fall back to
-  // the raw blob only when we couldn't reconstruct it.
+  // A post can contain captions for a short podcast preview even when its
+  // full video has no transcript. Post-id matching alone cannot distinguish
+  // those uploads. Select the primary media before looking for captions.
+  const primaryUpload =
+    currentPostObj?.videoUpload ??
+    currentPostObj?.video_upload ??
+    currentPostObj?.podcastUpload ??
+    currentPostObj?.podcast_upload ??
+    currentPostObj?.voiceoverUpload ??
+    null;
+  const transcriptions = [
+    primaryUpload?.extractedAudio?.transcription,
+    primaryUpload?.extracted_audio?.transcription,
+    primaryUpload?.transcription,
+  ].filter(t => t && typeof t === 'object');
+  const tx = transcriptions.find(t =>
+    Array.isArray(t.signed_captions) && t.signed_captions.some(c => typeof c?.url === 'string')
+  ) ?? transcriptions.find(t => typeof t.cdn_url === 'string') ?? null;
+
   let scoped = raw;
   if (currentPostObj) {
-    try { scoped = JSON.stringify(currentPostObj); } catch { /* keep raw */ }
+    scoped = JSON.stringify(primaryUpload || currentPostObj, (key, value) =>
+      key === 'podcastPreviewUpload' || key === 'podcast_preview_upload' ? undefined : value
+    );
+  } else if (/podcastPreviewUpload|podcast_preview_upload/.test(raw)) {
+    return { error: 'Could not distinguish the full recording from podcast-preview metadata. Reload the post and try again.' };
   }
 
   // Match only VTT URLs whose path contains /post/<currentPostId>/.
@@ -172,8 +237,45 @@ async function extractAndDownload(suggestedName, format) {
     currentPostId +
     '\\/[^"\\\\]+\\.vtt(?:\\?[^"\\\\]*)?'
   );
-  const vttMatch = scoped.match(scopedRe) || raw.match(scopedRe);
-  if (!vttMatch) {
+  const captions = Array.isArray(tx?.signed_captions) ? tx.signed_captions : [];
+  const tracks = captions.filter(c => typeof c?.url === 'string' && c.url.match(scopedRe))
+    .map((c, index) => ({
+      id: `${index}:${c.language || 'und'}:${c.url.split('?')[0]}`,
+      language: c.language || 'und',
+      label: `${c.language || 'Unspecified language'} - published captions (${index + 1})`,
+      url: c.url
+    }));
+  if (selection?.discover) {
+    return { postId: currentPostId, tracks: tracks.map(({ url, ...track }) => track) };
+  }
+  const selected = selection?.track
+    ? tracks.find(track => track.id === selection.track.id) : null;
+  if (selection?.track && (selection.postId !== currentPostId || !selected)) {
+    return { error: 'The post or selected transcript changed. Reopen the extension and choose it again.' };
+  }
+  const caption = selected || (captions.find(c => c?.language === 'en' && typeof c.url === 'string') ??
+    captions.find(c => typeof c?.url === 'string'));
+  const vttMatch = caption?.url.match(scopedRe) || scoped.match(scopedRe);
+  const txRe = new RegExp(
+    'https:\\/\\/substackcdn\\.com\\/video_upload\\/post\\/' +
+    currentPostId +
+    '\\/[^"\\\\]+\\/transcription\\.json(?:\\?[^"\\\\]*)?'
+  );
+  const transcriptionUrl = selected ? null :
+    (typeof tx?.cdn_url === 'string' ? tx.cdn_url.match(txRe)?.[0] : null) ||
+      scoped.match(txRe)?.[0] || null;
+  if (!vttMatch && !(format === 'md' && transcriptionUrl)) {
+    const preview = currentPostObj?.podcastPreviewUpload ?? currentPostObj?.podcast_preview_upload;
+    if (primaryUpload && preview?.transcription) {
+      return {
+        canTranscribe: true,
+        error:
+          'Substack has published captions only for this post\'s short podcast preview, ' +
+          'not the full recording. Preview captions were not downloaded. ' +
+          'To transcribe the full recording locally with Whisper, use the companion CLI ' +
+          'in tools/transcribe-substack/.'
+      };
+    }
     // Inline-body video without published captions. Substack lets authors
     // drop a video embed inside a normal text post; it renders as a
     // <video> element whose source points at /api/v1/video/upload/<id>/src
@@ -191,6 +293,7 @@ async function extractAndDownload(suggestedName, format) {
     if (inlineVideoEl) {
       const slug = currentPostObj?.slug || '(unknown)';
       return {
+        canTranscribe: true,
         error:
           'This post has an inline-body video, but Substack has not published ' +
           'captions for it. To transcribe it locally with Whisper, use the ' +
@@ -224,19 +327,21 @@ async function extractAndDownload(suggestedName, format) {
     const isAudioPost = !!document.querySelector('audio[src], audio source[src]');
     if (isAudioPost) {
       return {
+        canTranscribe: true,
         error:
           'This is an audio-only post — Substack does not publish a transcript for it. ' +
           'The signed MP3 URL is reachable on the page; transcription would need to happen externally.'
       };
     }
     return {
+      canTranscribe: true,
       error:
         'No transcript was found for this post (id ' + currentPostId + '). ' +
         'The post may be text-only, audio-only, or have no published captions yet. ' +
         'If this is a paid post, you must be signed in as a subscriber for Substack to expose signed caption URLs.'
     };
   }
-  const vttUrl = vttMatch[0];
+  const vttUrl = vttMatch?.[0];
 
   // ── Step 3: extract the speaker map ────────────────────────────────────
   // Same bug-shape risk: a raw-blob search for `"speaker_map":{...}` finds
@@ -247,8 +352,10 @@ async function extractAndDownload(suggestedName, format) {
   // Direct structured access (Substack stores speaker_map under the post's
   // video_upload block on video posts).
   const directMap =
+    tx?.speaker_map ??
+    primaryUpload?.speaker_map ??
     currentPostObj?.video_upload?.speaker_map ??
-    currentPostObj?.podcastFields?.speaker_map ??
+    (!primaryUpload ? currentPostObj?.podcastFields?.speaker_map : null) ??
     null;
   if (directMap && typeof directMap === 'object') {
     speakerMap = directMap;
@@ -261,66 +368,57 @@ async function extractAndDownload(suggestedName, format) {
     }
   }
 
-  // ── Step 3b: locate the signed transcription.json URL (preferred for .md)
-  // Substack's video posts also ship a sibling JSON file alongside the VTT
-  // that holds the *word-level* WhisperX output (start/end/speaker per
-  // word), along with their own `speaker_map`. The .vtt file is a coarse
-  // re-encoding of this same data — useful for video players, but it
-  // throws away the per-word timing that Substack's drawer uses to build
-  // paragraphs. The drawer fetches transcription.cdn_url, then runs a
-  // greedy chunker (same-speaker + cumulative word count ≤ 60) to produce
-  // the paragraphs the user sees. We replay that exact chunker against
-  // transcription.json to get a byte-perfect Markdown rendering. See the
-  // `transcriptionToMarkdown` comment further down for the algorithm.
-  //
-  // The URL is only used for the `format === 'md'` path. The .vtt path
-  // continues to fetch the signed VTT (Step 4) as-is.
-  let transcriptionUrl = null;
-  // Direct structured access (preferred). Substack's data path is
-  //   post.videoUpload.extractedAudio.transcription.cdn_url
-  // and at least one older snake_case variant has been observed in the
-  // wild on other publications.
-  const tx =
-    currentPostObj?.videoUpload?.extractedAudio?.transcription ??
-    currentPostObj?.video_upload?.extracted_audio?.transcription ??
-    currentPostObj?.videoUpload?.extracted_audio?.transcription ??
-    null;
-  if (tx && typeof tx === 'object') {
-    if (typeof tx.cdn_url === 'string') transcriptionUrl = tx.cdn_url;
-    // transcription.json carries its own speaker_map. Prefer it over the
-    // VTT-side map when present, since it's the same map Substack's
-    // drawer renderer uses.
-    if (tx.speaker_map && typeof tx.speaker_map === 'object' && Object.keys(tx.speaker_map).length) {
-      speakerMap = tx.speaker_map;
-    }
+  // Prefer the full published JSON for Markdown, even without a usable VTT.
+  const recordingDuration = Number(primaryUpload?.duration);
+  let transcriptionData = null;
+  if (format === 'md' && transcriptionUrl) {
+    try {
+      const response = await fetch(transcriptionUrl, { credentials: 'omit' });
+      if (response.ok) {
+        const parsed = await response.json();
+        if (Array.isArray(parsed) && parsed.length > 0 &&
+            parsed.every(sentence => sentence && Array.isArray(sentence.words) &&
+              typeof sentence.text === 'string' && sentence.text.trim() && Number.isFinite(sentence.start) &&
+              Number.isFinite(sentence.end))) {
+          const end = parsed.reduce((latest, sentence) => Math.max(latest, sentence.end), 0);
+          if (!(recordingDuration > 0) || end >= recordingDuration * 0.9 - 2) {
+            transcriptionData = parsed;
+          }
+        }
+      }
+    } catch { /* A usable VTT remains a published-transcript fallback. */ }
   }
-  if (!transcriptionUrl) {
-    // Raw-blob fallback, scoped to the current post id so we don't pick
-    // up a sidebar post's URL by accident. Mirrors the VTT regex shape.
-    const txRe = new RegExp(
-      'https:\\/\\/substackcdn\\.com\\/video_upload\\/post\\/' +
-      currentPostId +
-      '\\/[^"\\\\]+\\/transcription\\.json(?:\\?[^"\\\\]*)?'
-    );
-    const tm = scoped.match(txRe) || raw.match(txRe);
-    if (tm) transcriptionUrl = tm[0];
+  if (!transcriptionData && !vttUrl) {
+    return { canTranscribe: true, error: 'The published transcript is unavailable or incomplete. Using local transcription instead.' };
   }
 
   // ── Step 4: fetch the signed VTT ───────────────────────────────────────
-  let vttBody;
-  try {
-    const resp = await fetch(vttUrl, { credentials: 'omit' });
-    if (!resp.ok) {
-      return {
-        error: `Substack CDN returned HTTP ${resp.status} for the VTT URL. The signed URL may have expired — reload the page and try again.`
-      };
+  let vttBody = '';
+  if (!transcriptionData) {
+    try {
+      const resp = await fetch(vttUrl, { credentials: 'omit' });
+      if (!resp.ok) {
+        return {
+          error: `Substack CDN returned HTTP ${resp.status} for the VTT URL. The signed URL may have expired — reload the page and try again.`
+        };
+      }
+      vttBody = await resp.text();
+    } catch (e) {
+      return { error: 'Failed to fetch the VTT from Substack CDN: ' + (e?.message || String(e)) };
     }
-    vttBody = await resp.text();
-  } catch (e) {
-    return { error: 'Failed to fetch the VTT from Substack CDN: ' + (e?.message || String(e)) };
-  }
-  if (!/^\uFEFF?WEBVTT/.test(vttBody)) {
-    return { error: 'Fetched the URL but the response does not look like a WebVTT file.' };
+    if (!/^\uFEFF?WEBVTT/.test(vttBody)) {
+      return { error: 'Fetched the URL but the response does not look like a WebVTT file.' };
+    }
+    const publishedEnds = [...vttBody.matchAll(/-->\s*(?:(\d+):)?(\d{2}):(\d{2}(?:\.\d+)?)/g)]
+      .map(match => Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
+    if (!publishedEnds.length) {
+      return { canTranscribe: !selected, error: 'The published caption file contains no timed speech.' };
+    }
+    if (recordingDuration > 0 && publishedEnds.reduce((latest, end) => Math.max(latest, end), 0) < recordingDuration * 0.9 - 2) {
+      return { canTranscribe: !selected, error: selected
+        ? 'The selected captions cover only part of the full recording. No other transcript was substituted.'
+        : 'Published captions cover only part of the full recording. Using local transcription instead.' };
+    }
   }
 
   // ── Step 5: apply speaker map (SPEAKER_NN → real name) ─────────────────
@@ -334,25 +432,6 @@ async function extractAndDownload(suggestedName, format) {
     if (name) { resolvedNames++; return `<v ${name}>`; }
     return m;
   });
-
-  // ── Step 5b: try Substack's transcription.json for .md output ─────────
-  // We only attempt this for .md; .vtt output is unchanged.
-  // If anything goes wrong (missing URL, expired signature, network
-  // error, unexpected shape) we fall through to the VTT-based heuristic.
-  let transcriptionData = null;
-  if (format === 'md' && transcriptionUrl) {
-    try {
-      const tResp = await fetch(transcriptionUrl, { credentials: 'omit' });
-      if (tResp.ok) {
-        const parsed = await tResp.json();
-        // Validate shape: array of sentence objects with words[].
-        if (Array.isArray(parsed) && parsed.length > 0 &&
-            parsed[0] && Array.isArray(parsed[0].words)) {
-          transcriptionData = parsed;
-        }
-      }
-    } catch { /* fall through to VTT-based heuristic */ }
-  }
 
   // ── Step 6: convert + save ─────────────────────────────────────────────
   // Markdown renderer: parses cues, then groups them into paragraphs.
@@ -571,7 +650,10 @@ async function extractAndDownload(suggestedName, format) {
       title = title.replace(/[\\/:*?"<>|]/g, '_');
       filename = title || 'substack-transcript';
     }
-    filename = filename.replace(/\.(vtt|md|txt)$/i, '') + extension;
+    filename = filename.replace(/\.(vtt|md|txt)$/i, '');
+    const choice = String(selected?.language || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
+    if (choice) filename = filename.slice(0, Math.max(1, 180 - choice.length)) + '-' + choice;
+    filename += extension;
     const blob = new Blob([body], { type: mime });
     const u = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -617,6 +699,7 @@ async function extractAndDownload(suggestedName, format) {
 
   return {
     mode: 'fetched',
+    language: source === 'transcription-json' ? null : caption?.language || null,
     format,
     source,
     sourceUrl: source === 'transcription-json' ? transcriptionUrl : vttUrl,

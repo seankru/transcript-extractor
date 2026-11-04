@@ -1,6 +1,12 @@
 # Test harness / driver scripts — contain real transcript content + tempauth URLs
 .driver/
 .validation-output/
+.playwright-cli/
+__pycache__/
+extensions/*/transcription-worker.js
+extensions/*/transcription-client.js
+!extensions/_shared/transcription-worker.js
+!extensions/_shared/transcription-client.js
 
 # Per-extension listing assets (rendered locally for partner-center upload)
 extensions/*/screenshots/

@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Substack Transcript Extractor",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Save Substack video transcripts as WebVTT or Markdown, with speaker names resolved.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "nativeMessaging", "storage", "alarms"],
+  "background": { "service_worker": "transcription-worker.js" },
   "host_permissions": [
     "https://*.substack.com/*",
     "https://*.substackcdn.com/*"

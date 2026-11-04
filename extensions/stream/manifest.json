@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Stream Transcript Extractor",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Save Microsoft Stream / SharePoint recording and Teams meeting recap transcripts as WebVTT or Markdown, with speaker names preserved.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "nativeMessaging", "storage", "alarms"],
+  "background": { "service_worker": "transcription-worker.js" },
   "host_permissions": [
     "https://*.sharepoint.com/*",
     "https://*.sharepoint-df.com/*",
