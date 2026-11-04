@@ -279,9 +279,28 @@ check('captionUrlMatchesTrack rejects a manual track against an ASR URL',
 checkTrue('captionUrlMatchesTrack accepts a manual track against a kind-less URL',
   api.captionUrlMatchesTrack(
     'https://www.youtube.com/api/timedtext?v=abc&lang=en&vssId=.en', manualTrack, 'abc'));
-check('captionUrlMatchesTrack rejects a URL whose vssId differs from the track',
+check('captionUrlMatchesTrack rejects an explicit vssId that differs from the track',
   api.captionUrlMatchesTrack(
     'https://www.youtube.com/api/timedtext?v=abc&lang=en&kind=asr&vssId=a.de', asrTrack, 'abc'), false);
+// Real YouTube timed-text URLs do not consistently carry vssId even when the
+// player-response track object does. The AI Native DevCon reproduction video
+// exposes both shapes below; rejecting the missing parameter made both tracks
+// visible in the popup but impossible to fetch through the POT fallbacks.
+const devConManualTrack = {
+  languageCode: 'en-US',
+  vssId: '.en-US',
+  name: { simpleText: 'English (United States)' }
+};
+checkTrue('captionUrlMatchesTrack accepts the DevCon manual URL without vssId',
+  api.captionUrlMatchesTrack(
+    'https://www.youtube.com/api/timedtext?v=tTcxVv8HHNw&lang=en-US',
+    devConManualTrack,
+    'tTcxVv8HHNw'));
+checkTrue('captionUrlMatchesTrack accepts the DevCon ASR URL without vssId',
+  api.captionUrlMatchesTrack(
+    'https://www.youtube.com/api/timedtext?v=tTcxVv8HHNw&lang=en&kind=asr',
+    asrTrack,
+    'tTcxVv8HHNw'));
 // With no known video id the v parameter was left unconstrained, so a POT
 // fallback could accept another video's timedtext URL outright.
 check('captionUrlMatchesTrack still requires a video id when none is known',
@@ -395,6 +414,23 @@ fakePlayer([{ vssId: 'a.en', baseUrl: potUrl }]);
 check('findAudioCaptionUrl returns a matching tokenized URL',
   api.findAudioCaptionUrl(asrTrack, 'abc'), potUrl);
 
+const potUrlWithoutVssId =
+  'https://www.youtube.com/api/timedtext?v=abc&lang=en&kind=asr&pot=TOKEN';
+fakePlayer([{ baseUrl: potUrlWithoutVssId }]);
+check('findAudioCaptionUrl accepts one tokenized candidate without vssId',
+  api.findAudioCaptionUrl(asrTrack, 'abc'), potUrlWithoutVssId);
+
+fakePlayer([
+  { baseUrl: potUrlWithoutVssId },
+  { baseUrl: potUrlWithoutVssId.replace('pot=TOKEN', 'pot=OTHER') }
+]);
+check('findAudioCaptionUrl rejects ambiguous candidates without vssId',
+  api.findAudioCaptionUrl(asrTrack, 'abc'), null);
+
+fakePlayer([{ vssId: 'a.other', baseUrl: potUrlWithoutVssId }]);
+check('findAudioCaptionUrl rejects an explicit object-level vssId mismatch',
+  api.findAudioCaptionUrl(asrTrack, 'abc'), null);
+
 fakePlayer([{ vssId: 'a.en', baseUrl: potUrl.replace('&pot=TOKEN', '') }]);
 check('findAudioCaptionUrl rejects a candidate with no POT token',
   api.findAudioCaptionUrl(asrTrack, 'abc'), null);
@@ -451,6 +487,25 @@ check('findRuntimeCaptionUrl returns a tokenized URL seen after the request',
 checkTrue('findRuntimeCaptionUrl restores the previous track it read',
   JSON.stringify(calls[calls.length - 1]) ===
     JSON.stringify({ set: { vssId: '.en', languageCode: 'en' } }));
+
+calls = runtimePlayer({
+  tracklist: [{ vssId: 'a.en', languageCode: 'en', kind: 'asr' }],
+  priorTrack: { vssId: '.en', languageCode: 'en' },
+  loadedModules: ['captions'],
+  entries: [runtimeEntry(potUrlWithoutVssId, 1500)]
+});
+check('findRuntimeCaptionUrl accepts a fresh tokenized URL without vssId',
+  await api.findRuntimeCaptionUrl(asrTrack, 'abc'), potUrlWithoutVssId);
+
+calls = runtimePlayer({
+  tracklist: [{ vssId: 'a.other', languageCode: 'en', kind: 'asr' }],
+  priorTrack: { vssId: '.en', languageCode: 'en' },
+  loadedModules: ['captions'],
+  entries: [runtimeEntry(potUrlWithoutVssId, 1500)]
+});
+await api.findRuntimeCaptionUrl(asrTrack, 'abc');
+check('findRuntimeCaptionUrl does not select an explicit vssId mismatch',
+  calls.find(call => call?.set?.vssId === 'a.other'), undefined);
 
 // A resource logged before the request was issued is a leftover from an earlier
 // extraction; accepting it would return a stale, possibly expired URL.

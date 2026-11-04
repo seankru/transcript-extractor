@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Caption Extractor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Save available YouTube captions as WebVTT or Markdown.",
   "permissions": ["activeTab", "scripting"],
   "host_permissions": [
