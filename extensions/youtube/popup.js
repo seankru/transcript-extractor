@@ -9,6 +9,7 @@ const trackEl = document.getElementById('track');
 const extractBtn = document.getElementById('extract');
 
 let activeTabId = null;
+let discoveredVideoId = null;
 
 function setStatus(text, isError) {
   statusEl.textContent = text;
@@ -22,17 +23,54 @@ async function runInActiveTab(func, args = []) {
   }
   if (!activeTabId) throw new Error('No active tab.');
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: activeTabId },
-    world: 'MAIN',
-    func,
-    args
-  });
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: activeTabId },
+      world: 'MAIN',
+      func,
+      args
+    });
+  } catch (err) {
+    throw new Error('Could not run in the YouTube tab: ' + (err?.message || String(err)));
+  }
+
+  const framed = results?.find(entry => entry?.error);
+  if (framed) {
+    const message = framed.error?.message || String(framed.error);
+    throw new Error('The YouTube page raised an error: ' + message);
+  }
   return results?.find(entry => entry?.result)?.result;
+}
+
+// activeTab injects into whatever tab is focused, so the popup checks the tab's
+// origin before touching it rather than relying on the manifest's host scope.
+function isYouTubeTabUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:') return false;
+    return url.hostname === 'youtube.com' ||
+      url.hostname.endsWith('.youtube.com') ||
+      url.hostname === 'youtube-nocookie.com' ||
+      url.hostname.endsWith('.youtube-nocookie.com');
+  } catch {
+    return false;
+  }
+}
+
+async function resolveYouTubeTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error('No active tab.');
+  if (!isYouTubeTabUrl(tab.url)) {
+    throw new Error('Open a YouTube video tab, then click the extension there.');
+  }
+  activeTabId = tab.id;
+  return tab;
 }
 
 async function loadCaptionTracks() {
   try {
+    await resolveYouTubeTab();
     const result = await runInActiveTab(discoverCaptionTracks);
     if (result?.error) throw new Error(result.error);
     if (!result?.tracks?.length) throw new Error('This video has no available caption tracks.');
@@ -46,6 +84,7 @@ async function loadCaptionTracks() {
     }
     trackEl.disabled = false;
     extractBtn.disabled = false;
+    discoveredVideoId = result.videoId || null;
     setStatus(`Found ${result.tracks.length} caption track${result.tracks.length === 1 ? '' : 's'}.`);
   } catch (err) {
     trackEl.innerHTML = '<option>No captions found</option>';
@@ -62,7 +101,8 @@ extractBtn.addEventListener('click', async () => {
     const result = await runInActiveTab(extractAndDownload, [
       Number.isFinite(trackIndex) ? trackIndex : 0,
       filenameEl.value.trim() || null,
-      format
+      format,
+      discoveredVideoId
     ]);
 
     if (result?.error) throw new Error(result.error);
@@ -114,6 +154,7 @@ function discoverCaptionTracks() {
   const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
   return {
     title: response.videoDetails?.title || document.title.replace(/\s*-\s*YouTube\s*$/i, ''),
+    videoId: response.videoDetails?.videoId || null,
     tracks: tracks.map((track, index) => ({
       index,
       name: trackName(track),
@@ -123,7 +164,7 @@ function discoverCaptionTracks() {
   };
 }
 
-async function extractAndDownload(trackIndex, suggestedName, format) {
+async function extractAndDownload(trackIndex, suggestedName, format, expectedVideoId) {
   format = format === 'md' ? 'md' : 'vtt';
 
   function getPlayerResponse() {
@@ -160,41 +201,113 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
       const durationMs = Math.max(0, Number(event.dDurationMs) || 0);
       cues.push({ startMs, endMs: startMs + durationMs, text });
     }
-    return cues;
+    // fillCueEndTimes reads cues[i+1] as the chronological successor, so JSON3
+    // events that arrive out of order would otherwise produce wrong cue ends.
+    return cues.sort((a, b) => a.startMs - b.startMs);
+  }
+
+  function decodeEntities(value) {
+    // Legacy timedtext XML double-escapes, so DOMParser leaves a literal
+    // "&#39;" behind. Decode one more level before the VTT writer re-escapes.
+    return String(value || '').replace(/&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, entity) => {
+      if (entity[0] === '#') {
+        const code = entity[1] === 'x' || entity[1] === 'X'
+          ? Number.parseInt(entity.slice(2), 16)
+          : Number.parseInt(entity.slice(1), 10);
+        // String.fromCodePoint throws RangeError outside Unicode range or on a
+        // surrogate half; an unguarded call aborts the whole XML fallback.
+        const inRange = Number.isFinite(code) && code > 0 && code <= 0x10ffff &&
+          !(code >= 0xd800 && code <= 0xdfff);
+        return inRange ? String.fromCodePoint(code) : match;
+      }
+      const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+      return Object.prototype.hasOwnProperty.call(named, entity.toLowerCase())
+        ? named[entity.toLowerCase()]
+        : match;
+    });
+  }
+
+  function nodeTextWithBreaks(node) {
+    // textContent drops <br/> boundaries without substituting whitespace, so
+    // "first<br/>second" would export as the corrupt "firstsecond". Walk the
+    // children instead and turn each break element into a space.
+    if (!node) return '';
+    let out = '';
+    for (const child of Array.from(node.childNodes || [])) {
+      if (child.nodeType === 1) {
+        out += String(child.nodeName || '').toLowerCase() === 'br'
+          ? ' '
+          : nodeTextWithBreaks(child);
+      } else {
+        out += child.nodeValue || '';
+      }
+    }
+    return out;
   }
 
   function xmlToCues(xmlText) {
     const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
-    if (doc.querySelector('parsererror')) return [];
+    // getElementsByTagName rather than querySelector: it is the one lookup every
+    // XML DOM implementation provides, so this path stays testable outside a
+    // browser instead of being skipped.
+    if (doc.getElementsByTagName('parsererror').length) return [];
 
-    const legacy = Array.from(doc.querySelectorAll('text')).map(node => {
-      const startMs = Math.max(0, (Number(node.getAttribute('start')) || 0) * 1000);
-      const durationMs = Math.max(0, (Number(node.getAttribute('dur')) || 0) * 1000);
-      return { startMs, endMs: startMs + durationMs, text: cleanText(node.textContent) };
-    });
-    const srv3 = Array.from(doc.querySelectorAll('p')).map(node => {
-      const startMs = Math.max(0, Number(node.getAttribute('t')) || 0);
-      const durationMs = Math.max(0, Number(node.getAttribute('d')) || 0);
-      return { startMs, endMs: startMs + durationMs, text: cleanText(node.textContent) };
-    });
-    return legacy.concat(srv3).filter(cue => cue.text);
+    // An HTML bot interstitial or soft error page is served with HTTP 200 and
+    // parses as well-formed XML, so without a structural check every <p> in it
+    // became a cue and the UI reported a successful export. Require a timed-text
+    // root, and require each cue node to actually carry a timing attribute.
+    const rootName = String(doc.documentElement?.nodeName || '').toLowerCase();
+    if (!['timedtext', 'transcript', 'tt'].includes(rootName)) return [];
+
+    const hasTiming = (node, ...names) =>
+      names.some(attribute => node.getAttribute(attribute) !== null &&
+        node.getAttribute(attribute) !== '');
+
+    const legacy = Array.from(doc.getElementsByTagName('text'))
+      .filter(node => hasTiming(node, 'start', 'dur'))
+      .map(node => {
+        const startMs = Math.max(0, (Number(node.getAttribute('start')) || 0) * 1000);
+        const durationMs = Math.max(0, (Number(node.getAttribute('dur')) || 0) * 1000);
+        return { startMs, endMs: startMs + durationMs, text: cleanText(decodeEntities(nodeTextWithBreaks(node))) };
+      });
+    const srv3 = Array.from(doc.getElementsByTagName('p'))
+      .filter(node => hasTiming(node, 't', 'd'))
+      .map(node => {
+        const startMs = Math.max(0, Number(node.getAttribute('t')) || 0);
+        const durationMs = Math.max(0, Number(node.getAttribute('d')) || 0);
+        return { startMs, endMs: startMs + durationMs, text: cleanText(decodeEntities(nodeTextWithBreaks(node))) };
+      });
+    // fillCueEndTimes assumes cues[i+1] is the chronological successor, which
+    // concatenating two document sections does not guarantee.
+    return legacy.concat(srv3)
+      .filter(cue => cue.text)
+      .sort((a, b) => a.startMs - b.startMs);
   }
 
   function captionUrlMatchesTrack(rawUrl, track, videoId) {
     try {
       const url = new URL(rawUrl, location.href);
+      // A resource-timing entry can come from any origin on the page, so the
+      // host is checked here too rather than only at fetch time.
+      if (url.protocol !== 'https:' || !isYouTubeCaptionHost(url.hostname)) return false;
       if (!/\/api\/timedtext$/i.test(url.pathname)) return false;
       const urlVideoId = url.searchParams.get('v');
       const languageCode = url.searchParams.get('lang');
       const kind = url.searchParams.get('kind');
       const vssId = url.searchParams.get('vssId') || url.searchParams.get('vss_id');
       const name = url.searchParams.get('name');
-      if (urlVideoId && videoId && urlVideoId !== videoId) return false;
-      if (languageCode && track.languageCode && languageCode !== track.languageCode) return false;
-      if (vssId && track.vssId && vssId !== track.vssId) return false;
-      if (name && trackName(track) && name !== trackName(track)) return false;
-      if (track.kind === 'asr' && kind && kind !== 'asr') return false;
-      if (track.kind !== 'asr' && kind === 'asr') return false;
+      // A missing identifying parameter is not a match: treating it as a
+      // wildcard let an unrelated entry win the POT fallback.
+      if (!urlVideoId) return false;
+      if (videoId && urlVideoId !== videoId) return false;
+      if (track.languageCode && languageCode !== track.languageCode) return false;
+      if (track.vssId && vssId !== track.vssId) return false;
+      if (trackName(track) && name !== null && name !== trackName(track)) return false;
+      // kind is the auto-generated/manual discriminator, and it is reported back
+      // to the user as isAutoGenerated. An absent kind cannot be assumed to
+      // match an ASR track, or a manual one would deliver ASR cues labelled
+      // manual (and vice versa).
+      if ((track.kind === 'asr') !== (kind === 'asr')) return false;
       return true;
     } catch {
       return false;
@@ -215,7 +328,9 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
     };
 
     let previousTrack;
+    let previousTrackRead = false;
     let captionsWereLoaded;
+    let trackWasMutated = false;
     try {
       if (typeof performance.setResourceTimingBufferSize === 'function') {
         performance.setResourceTimingBufferSize(1000);
@@ -225,7 +340,10 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
         captionsWereLoaded = Array.isArray(loadedModules) && loadedModules.includes('captions');
       }
       if (typeof player.getOption === 'function') {
-        try { previousTrack = player.getOption('captions', 'track'); } catch { /* module not loaded */ }
+        try {
+          previousTrack = player.getOption('captions', 'track');
+          previousTrackRead = true;
+        } catch { /* module not loaded */ }
       }
       if (captionsWereLoaded !== true && typeof player.loadModule === 'function') {
         player.loadModule('captions');
@@ -251,6 +369,7 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
       // Re-selecting the active track can be a no-op, so briefly clear it to
       // force the player to issue a fresh, tokenized timed-text request.
       player.setOption('captions', 'track', {});
+      trackWasMutated = true;
       await new Promise(resolve => setTimeout(resolve, 50));
       const requestStartedAt = performance.now();
       player.setOption('captions', 'track', target);
@@ -266,10 +385,22 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
     } catch {
       return null;
     } finally {
+      // Restore whatever caption state the viewer had. Every path that mutated
+      // the track must undo it, including when the previous track could not be
+      // read - otherwise the player is left switched to our pick.
       if (captionsWereLoaded === false && typeof player.unloadModule === 'function') {
         try { player.unloadModule('captions'); } catch { /* best effort */ }
-      } else if (previousTrack !== undefined) {
-        try { player.setOption('captions', 'track', previousTrack); } catch { /* best effort */ }
+      } else if (previousTrackRead) {
+        try { player.setOption('captions', 'track', previousTrack || {}); } catch { /* best effort */ }
+      } else if (trackWasMutated) {
+        // The prior track was unreadable, so it cannot be restored. Unloading
+        // the module leaves the player closer to its untouched state than
+        // setOption({}), which pins captions off.
+        if (typeof player.unloadModule === 'function') {
+          try { player.unloadModule('captions'); } catch { /* best effort */ }
+        } else {
+          try { player.setOption('captions', 'track', {}); } catch { /* best effort */ }
+        }
       }
     }
   }
@@ -293,8 +424,20 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
     }
   }
 
+  function isYouTubeCaptionHost(hostname) {
+    return hostname === 'youtube.com' ||
+      hostname.endsWith('.youtube.com') ||
+      hostname === 'youtube-nocookie.com' ||
+      hostname.endsWith('.youtube-nocookie.com');
+  }
+
   async function fetchCaptionTrack(rawUrl) {
     const captionUrl = new URL(rawUrl, location.href);
+    // The README and PRIVACY.md both promise YouTube-only network access; this
+    // is the check that makes that true in code rather than by convention.
+    if (captionUrl.protocol !== 'https:' || !isYouTubeCaptionHost(captionUrl.hostname)) {
+      return { ok: false, status: 0, body: '', blocked: true };
+    }
     captionUrl.searchParams.set('fmt', 'json3');
     const response = await fetch(captionUrl.href, { credentials: 'include' });
     return {
@@ -340,22 +483,41 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
     for (const cue of cues) {
       lines.push(
         `${vttTime(cue.startMs)} --> ${vttTime(cue.endMs)}`,
+        // Escaping > covers the "-->" cue-terminator case too, since the
+        // escaped form "--&gt;" can no longer be read as a terminator.
         cue.text
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
-          .replace(/-->/g, '->'),
+          .replace(/>/g, '&gt;'),
         ''
       );
     }
     return lines.join('\n');
   }
 
-  function extractChapters(playerResponse) {
-    const markerMaps = playerResponse?.playerOverlays?.playerOverlayRenderer
-      ?.decoratedPlayerBarRenderer?.decoratedPlayerBarRenderer?.playerBar
-      ?.multiMarkersPlayerBarRenderer?.markersMap || [];
-    const chapterEntries = markerMaps.find(entry => entry?.key === 'DESCRIPTION_CHAPTERS')
-      ?.value?.chapters || [];
+  function extractChapters(playerResponse, initialData, expectedVideoId) {
+    // markersMap is served in the /next response (window.ytInitialData) on real
+    // watch pages; the player response does not always carry it. Read both and
+    // take whichever supplies DESCRIPTION_CHAPTERS.
+    //
+    // ytInitialData is a page global that YouTube's SPA navigation may leave
+    // pointing at a previously watched video, which would write the wrong
+    // video's chapters into the export. The player response is already guarded
+    // by video id at the call site, so guard this one the same way.
+    const initialDataVideoId =
+      initialData?.currentVideoEndpoint?.watchEndpoint?.videoId || null;
+    const initialDataUsable = !expectedVideoId || !initialDataVideoId ||
+      initialDataVideoId === expectedVideoId;
+    const sources = [playerResponse, initialDataUsable ? initialData : null];
+    let chapterEntries = [];
+    for (const source of sources) {
+      const markerMaps = source?.playerOverlays?.playerOverlayRenderer
+        ?.decoratedPlayerBarRenderer?.decoratedPlayerBarRenderer?.playerBar
+        ?.multiMarkersPlayerBarRenderer?.markersMap || [];
+      const found = markerMaps.find(entry => entry?.key === 'DESCRIPTION_CHAPTERS')
+        ?.value?.chapters || [];
+      if (found.length) { chapterEntries = found; break; }
+    }
     return chapterEntries.map(entry => {
       const chapter = entry?.chapterRenderer;
       const title = chapter?.title?.simpleText ||
@@ -368,16 +530,30 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
   }
 
   function cuesToMarkdown(cues, title, chapters) {
-    const lines = [`# ${title || 'Transcript'}`, ''];
+    // cleanText collapses newlines: an untreated title injects extra Markdown
+    // headings into the export.
+    const lines = [`# ${cleanText(title) || 'Transcript'}`, ''];
+    // A YouTube-supplied chapter title beginning with '#' would otherwise close
+    // the heading line with a second heading marker.
+    const headingText = (text) => String(text).replace(/^#+\s*/, '');
     let chapterIndex = 0;
+    let emitted = 0;
     for (const cue of cues) {
       while (chapterIndex < chapters.length && chapters[chapterIndex].startMs <= cue.startMs) {
         const chapter = chapters[chapterIndex++];
-        lines.push(`## [${shortTime(chapter.startMs)}] ${chapter.title}`, '');
+        lines.push(`## [${shortTime(chapter.startMs)}] ${headingText(chapter.title)}`, '');
+        emitted++;
       }
       lines.push(`**[${shortTime(cue.startMs)}]** ${cue.text}`, '');
     }
-    return lines.join('\n');
+    // Chapters that start after the last cue still belong in the document;
+    // without this flush they were dropped while the popup reported them.
+    while (chapterIndex < chapters.length) {
+      const chapter = chapters[chapterIndex++];
+      lines.push(`## [${shortTime(chapter.startMs)}] ${headingText(chapter.title)}`, '');
+      emitted++;
+    }
+    return { markdown: lines.join('\n'), chapterCount: emitted };
   }
 
   function saveFile(body, baseName, extension, fallbackTitle) {
@@ -406,6 +582,13 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
   const response = getPlayerResponse();
   if (!response) return { error: 'YouTube player data is not available.' };
 
+  const currentVideoId = response.videoDetails?.videoId || null;
+  if (expectedVideoId && currentVideoId && expectedVideoId !== currentVideoId) {
+    return {
+      error: 'The tab moved to a different video since the popup opened. Reopen the extension and try again.'
+    };
+  }
+
   const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
   const track = tracks[trackIndex];
   if (!track?.baseUrl) return { error: 'The selected caption track is no longer available. Reopen the extension and try again.' };
@@ -421,6 +604,9 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
     if (runtimeUrl) captionResponse = await fetchCaptionTrack(runtimeUrl);
   }
   if (!captionResponse.ok) {
+    if (captionResponse.blocked) {
+      return { error: 'Refused to fetch a caption URL outside youtube.com.' };
+    }
     return { error: `YouTube returned HTTP ${captionResponse.status} for the caption track.` };
   }
   if (!captionResponse.body.trim()) {
@@ -440,8 +626,11 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
   if (!cues.length) return { error: 'The selected caption track contained no readable cues.' };
 
   const title = response.videoDetails?.title || document.title.replace(/\s*-\s*YouTube\s*$/i, '');
-  const chapters = format === 'md' ? extractChapters(response) : [];
-  const payload = format === 'md' ? cuesToMarkdown(cues, title, chapters) : cuesToVtt(cues);
+  const chapters = format === 'md'
+    ? extractChapters(response, window.ytInitialData, currentVideoId)
+    : [];
+  const rendered = format === 'md' ? cuesToMarkdown(cues, title, chapters) : null;
+  const payload = rendered ? rendered.markdown : cuesToVtt(cues);
   const extension = format === 'md' ? '.md' : '.vtt';
   const filename = saveFile(payload, suggestedName, extension, title);
 
@@ -453,6 +642,6 @@ async function extractAndDownload(trackIndex, suggestedName, format) {
     trackName: trackName(track),
     languageCode: track.languageCode || 'und',
     isAutoGenerated: track.kind === 'asr',
-    chapterCount: chapters.length
+    chapterCount: rendered ? rendered.chapterCount : 0
   };
 }
