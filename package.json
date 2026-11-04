@@ -5,7 +5,7 @@
   "description": "Development tooling for the transcript-extractor browser extensions. The extensions themselves ship no npm dependencies; this manifest exists only so the test harnesses can be installed reproducibly.",
   "license": "MIT",
   "scripts": {
-    "test": "node extensions/youtube/tests/run.mjs && node extensions/substack/tests/run.mjs && node extensions/stream/tests/run.mjs && node extensions/spotify/tests/run.mjs && node extensions/_shared/tests/run.mjs",
+    "test": "node extensions/youtube/tests/run.mjs && node extensions/youtube/tests/panel.mjs && node extensions/substack/tests/run.mjs && node extensions/stream/tests/run.mjs && node extensions/spotify/tests/run.mjs && node extensions/_shared/tests/run.mjs",
     "test:spotify": "node extensions/spotify/tests/run.mjs",
     "test:stream": "node extensions/stream/tests/run.mjs",
     "test:substack": "node extensions/substack/tests/run.mjs",

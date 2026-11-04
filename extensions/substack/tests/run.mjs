@@ -30,7 +30,7 @@ const preview = () => ({
   transcription: transcript(previewVtt, previewJson, 'Preview speaker'),
 });
 
-async function extract(post, { format = 'vtt', stringify = false, extra = {}, responses = {}, raw } = {}) {
+async function extract(post, { format = 'vtt', stringify = false, extra = {}, responses = {}, raw, selection } = {}) {
   const requests = [];
   const downloads = [];
   let payload;
@@ -63,9 +63,64 @@ async function extract(post, { format = 'vtt', stringify = false, extra = {}, re
     },
   });
   vm.runInContext(injected, context);
-  const result = await context.extractAndDownload(null, format);
+  const result = await context.extractAndDownload(null, format, selection);
   return { result, requests, downloads, payload: payload ? await payload.text() : null };
 }
+
+test('discovers primary caption languages without fetching, downloading, or exposing signed tokens', async () => {
+  const tx = transcript();
+  tx.signed_captions.push({ language: 'fr', url: resource('full', 'fr.vtt') });
+  const { result, requests, downloads } = await extract({
+    videoUpload: { transcription: tx }, podcastPreviewUpload: preview()
+  }, { selection: { discover: true } });
+  assert.equal(result.tracks.length, 2);
+  assert.deepEqual(Array.from(result.tracks, track => track.language), ['en', 'fr']);
+  assert.doesNotMatch(JSON.stringify(result), /signature|preview/);
+  assert.deepEqual(requests, []);
+  assert.deepEqual(downloads, []);
+});
+
+for (const format of ['md', 'vtt']) {
+  test(`${format}: explicit translated captions never use original-language JSON`, async () => {
+    const french = resource('full', 'fr.vtt');
+    const tx = transcript();
+    tx.signed_captions.push({ language: 'fr', url: french });
+    const post = { videoUpload: { duration: 1356, transcription: tx } };
+    const discovery = await extract(post, { selection: { discover: true } });
+    const { result, requests, payload } = await extract(post, {
+      format, selection: { postId, track: discovery.result.tracks[1] },
+      responses: { [french]: { ok: true, text: async () => vtt.replaceAll('sentence', 'phrase francaise') } }
+    });
+    assert.equal(result.language, 'fr');
+    assert.equal(result.filename, `Test post-fr.${format}`);
+    assert.deepEqual(requests, [french]);
+    assert.match(payload, /phrase francaise/);
+    assert.doesNotMatch(payload, /Opening sentence/);
+  });
+}
+
+test('stale explicit Substack choices fail without choosing a default or Whisper', async () => {
+  const { result, requests, downloads } = await extract({ videoUpload: { transcription: transcript() } }, {
+    selection: { postId: postId + 1, track: { id: 'missing' } }
+  });
+  assert.match(result.error, /selected transcript changed/);
+  assert.equal(result.canTranscribe, undefined);
+  assert.deepEqual(requests, []);
+  assert.deepEqual(downloads, []);
+});
+
+test('partial explicitly selected captions do not authorize a different transcript or Whisper', async () => {
+  const post = { videoUpload: { duration: 1356, transcription: transcript() } };
+  const discovery = await extract(post, { selection: { discover: true } });
+  const { result, requests, downloads } = await extract(post, {
+    format: 'md', selection: { postId, track: discovery.result.tracks[0] },
+    responses: { [fullVtt]: { ok: true, text: async () => 'WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nPartial\n' } }
+  });
+  assert.equal(result.canTranscribe, false);
+  assert.match(result.error, /No other transcript/);
+  assert.deepEqual(requests, [fullVtt]);
+  assert.deepEqual(downloads, []);
+});
 
 for (const format of ['vtt', 'md']) {
   for (const stringify of [false, true]) {

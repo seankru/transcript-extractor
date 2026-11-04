@@ -15,6 +15,38 @@
 const statusEl = document.getElementById('status');
 const filenameEl = document.getElementById('filename');
 const extractBtn = document.getElementById('extract');
+const trackEl = document.getElementById('track');
+let transcriptChoices = null;
+let sourceTabId = null;
+
+async function loadTranscriptChoices() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('No active tab.');
+    sourceTabId = tab.id;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, world: 'MAIN', func: extractAndDownload,
+      args: [null, 'md', { discover: true }]
+    });
+    const result = results?.[0]?.result;
+    if (result?.error) throw new Error(result.error);
+    transcriptChoices = result;
+    for (const track of result.tracks) {
+      const option = document.createElement('option');
+      option.value = track.id;
+      option.textContent = track.label;
+      trackEl.appendChild(option);
+    }
+    trackEl.disabled = !result.tracks.length;
+    if (result.tracks.length > 1) setStatus('Choose the transcript language you want to extract.');
+  } catch (error) {
+    setStatus('Transcript choices unavailable: ' + error.message + ' You can retry with Extract.', true);
+  } finally {
+    await localTranscription.restore();
+    extractBtn.disabled = localTranscription.busy;
+    trackEl.disabled = localTranscription.busy || !transcriptChoices?.tracks.length;
+  }
+}
 
 function setStatus(text, isError) {
   statusEl.textContent = text;
@@ -24,6 +56,7 @@ function setStatus(text, isError) {
 extractBtn.addEventListener('click', async () => {
   setStatus('Extracting\u2026 keep this popup open.');
   extractBtn.disabled = true;
+  trackEl.disabled = true;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) {
@@ -33,6 +66,8 @@ extractBtn.addEventListener('click', async () => {
     }
 
     const format = (document.querySelector('input[name="format"]:checked')?.value) === 'vtt' ? 'vtt' : 'md';
+    const selected = transcriptChoices?.tracks.find(track => track.id === trackEl.value);
+    if (selected && tab.id !== sourceTabId) throw new Error('The active tab changed. Reopen the extension to choose its transcript.');
 
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -44,7 +79,8 @@ extractBtn.addEventListener('click', async () => {
       // serializations.
       world: 'MAIN',
       func: extractAndDownload,
-      args: [filenameEl.value.trim() || null, format]
+      args: [filenameEl.value.trim() || null, format,
+        selected ? { postId: transcriptChoices.postId, track: selected } : null]
     });
 
     const success = results?.find(x => x?.result && !x.result.error && (x.result.cueCount > 0 || x.result.paragraphCount > 0))?.result;
@@ -65,13 +101,13 @@ extractBtn.addEventListener('click', async () => {
         ? `Rendered ${success.paragraphCount} paragraph${success.paragraphCount === 1 ? '' : 's'} from ${success.sentenceCount} sentences (${(success.byteCount / 1024).toFixed(1)} KB).`
         : `Extracted ${success.cueCount} cues (${(success.byteCount / 1024).toFixed(1)} KB).`;
       setStatus(
-        `Source: ${sourceLabel}\n${speakerLine}` +
+        `Source: ${sourceLabel}${success.language ? `\nTranscript language: ${success.language}.` : ''}\n${speakerLine}` +
         `${countLine}\n` +
         `Saved to Downloads as:\n${success.filename}`
       );
     } else {
       const err = results?.find(x => x?.result?.error)?.result;
-      if (err?.canTranscribe) {
+      if (err?.canTranscribe && !selected) {
         setStatus('No full published transcript. Checking local transcription preference...');
         await localTranscription.start('substack', tab, format, filenameEl.value.trim());
       } else {
@@ -82,13 +118,16 @@ extractBtn.addEventListener('click', async () => {
     setStatus('Inject failed: ' + (err?.message || String(err)), true);
   }
   extractBtn.disabled = localTranscription.busy;
+  trackEl.disabled = localTranscription.busy || !transcriptChoices?.tracks.length;
 });
+
+loadTranscriptChoices();
 
 // ---------------------------------------------------------------------------
 // Injected into the active tab's content world. Must be self-contained
 // because chrome.scripting serializes it across the boundary.
 // ---------------------------------------------------------------------------
-async function extractAndDownload(suggestedName, format) {
+async function extractAndDownload(suggestedName, format, selection) {
   format = (format === 'vtt') ? 'vtt' : 'md';
 
   // ── Step 1: locate the Substack preloads blob ──────────────────────────
@@ -199,16 +238,32 @@ async function extractAndDownload(suggestedName, format) {
     '\\/[^"\\\\]+\\.vtt(?:\\?[^"\\\\]*)?'
   );
   const captions = Array.isArray(tx?.signed_captions) ? tx.signed_captions : [];
-  const caption = captions.find(c => c?.language === 'en' && typeof c.url === 'string') ??
-    captions.find(c => typeof c?.url === 'string');
+  const tracks = captions.filter(c => typeof c?.url === 'string' && c.url.match(scopedRe))
+    .map((c, index) => ({
+      id: `${index}:${c.language || 'und'}:${c.url.split('?')[0]}`,
+      language: c.language || 'und',
+      label: `${c.language || 'Unspecified language'} - published captions (${index + 1})`,
+      url: c.url
+    }));
+  if (selection?.discover) {
+    return { postId: currentPostId, tracks: tracks.map(({ url, ...track }) => track) };
+  }
+  const selected = selection?.track
+    ? tracks.find(track => track.id === selection.track.id) : null;
+  if (selection?.track && (selection.postId !== currentPostId || !selected)) {
+    return { error: 'The post or selected transcript changed. Reopen the extension and choose it again.' };
+  }
+  const caption = selected || (captions.find(c => c?.language === 'en' && typeof c.url === 'string') ??
+    captions.find(c => typeof c?.url === 'string'));
   const vttMatch = caption?.url.match(scopedRe) || scoped.match(scopedRe);
   const txRe = new RegExp(
     'https:\\/\\/substackcdn\\.com\\/video_upload\\/post\\/' +
     currentPostId +
     '\\/[^"\\\\]+\\/transcription\\.json(?:\\?[^"\\\\]*)?'
   );
-  const transcriptionUrl = (typeof tx?.cdn_url === 'string' ? tx.cdn_url.match(txRe)?.[0] : null) ||
-    scoped.match(txRe)?.[0] || null;
+  const transcriptionUrl = selected ? null :
+    (typeof tx?.cdn_url === 'string' ? tx.cdn_url.match(txRe)?.[0] : null) ||
+      scoped.match(txRe)?.[0] || null;
   if (!vttMatch && !(format === 'md' && transcriptionUrl)) {
     const preview = currentPostObj?.podcastPreviewUpload ?? currentPostObj?.podcast_preview_upload;
     if (primaryUpload && preview?.transcription) {
@@ -357,10 +412,12 @@ async function extractAndDownload(suggestedName, format) {
     const publishedEnds = [...vttBody.matchAll(/-->\s*(?:(\d+):)?(\d{2}):(\d{2}(?:\.\d+)?)/g)]
       .map(match => Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
     if (!publishedEnds.length) {
-      return { canTranscribe: true, error: 'The published caption file contains no timed speech.' };
+      return { canTranscribe: !selected, error: 'The published caption file contains no timed speech.' };
     }
     if (recordingDuration > 0 && publishedEnds.reduce((latest, end) => Math.max(latest, end), 0) < recordingDuration * 0.9 - 2) {
-      return { canTranscribe: true, error: 'Published captions cover only part of the full recording. Using local transcription instead.' };
+      return { canTranscribe: !selected, error: selected
+        ? 'The selected captions cover only part of the full recording. No other transcript was substituted.'
+        : 'Published captions cover only part of the full recording. Using local transcription instead.' };
     }
   }
 
@@ -593,7 +650,10 @@ async function extractAndDownload(suggestedName, format) {
       title = title.replace(/[\\/:*?"<>|]/g, '_');
       filename = title || 'substack-transcript';
     }
-    filename = filename.replace(/\.(vtt|md|txt)$/i, '') + extension;
+    filename = filename.replace(/\.(vtt|md|txt)$/i, '');
+    const choice = String(selected?.language || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
+    if (choice) filename = filename.slice(0, Math.max(1, 180 - choice.length)) + '-' + choice;
+    filename += extension;
     const blob = new Blob([body], { type: mime });
     const u = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -639,6 +699,7 @@ async function extractAndDownload(suggestedName, format) {
 
   return {
     mode: 'fetched',
+    language: source === 'transcription-json' ? null : caption?.language || null,
     format,
     source,
     sourceUrl: source === 'transcription-json' ? transcriptionUrl : vttUrl,

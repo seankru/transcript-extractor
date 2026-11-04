@@ -34,7 +34,7 @@ function extractFunction(name) {
 }
 
 const NAMES = [
-  'cleanText', 'trackName', 'jsonToCues', 'decodeEntities', 'nodeTextWithBreaks',
+  'cleanText', 'trackName', 'getPlayer', 'jsonToCues', 'decodeEntities', 'nodeTextWithBreaks',
   'xmlToCues', 'vttTime', 'shortTime', 'cuesToVtt', 'cuesToMarkdown',
   'fillCueEndTimes', 'isYouTubeCaptionHost', 'isYouTubeTabUrl',
   'captionUrlMatchesTrack', 'extractChapters', 'findAudioCaptionUrl',
@@ -109,7 +109,7 @@ function allDeclarations(name) {
   return bodies;
 }
 
-for (const duplicated of ['trackName', 'getPlayerResponse']) {
+for (const duplicated of ['trackName', 'getPlayer', 'getPlayerResponse']) {
   const bodies = allDeclarations(duplicated);
   checkTrue(`${duplicated} copies in popup.js are identical (${bodies.length} found)`,
     bodies.length > 0 && bodies.every(body => body === bodies[0]));
@@ -497,6 +497,24 @@ calls = runtimePlayer({
 check('findRuntimeCaptionUrl accepts a fresh tokenized URL without vssId',
   await api.findRuntimeCaptionUrl(asrTrack, 'abc'), potUrlWithoutVssId);
 
+runtimePlayer({
+  tracklist: [{ vssId: 'a.en', languageCode: 'en', kind: 'asr' }],
+  loadedModules: ['captions'], priorTrack: {},
+  entries: [runtimeEntry(potUrl + '&c=WEB', 1500), runtimeEntry(potUrl, 1600)]
+});
+check('findRuntimeCaptionUrl prefers complete client context over a newer incomplete POT URL',
+  await api.findRuntimeCaptionUrl(asrTrack, 'abc'), potUrl + '&c=WEB');
+
+runtimePlayer({
+  tracklist: [{ vssId: 'a.en', languageCode: 'en', kind: 'asr' }],
+  loadedModules: ['captions'], priorTrack: {},
+});
+let resourceReads = 0;
+globalThis.performance.getEntriesByType = () => ++resourceReads < 4
+  ? [runtimeEntry(potUrl, 1500)] : [runtimeEntry(potUrl, 1500), runtimeEntry(potUrl + '&c=WEB', 1600)];
+check('findRuntimeCaptionUrl waits for the full native request rather than returning an early incomplete URL',
+  await api.findRuntimeCaptionUrl(asrTrack, 'abc'), potUrl + '&c=WEB');
+
 calls = runtimePlayer({
   tracklist: [{ vssId: 'a.other', languageCode: 'en', kind: 'asr' }],
   priorTrack: { vssId: '.en', languageCode: 'en' },
@@ -582,6 +600,13 @@ check('saveFile falls back when the name is empty after cleaning',
   api.saveFile('body', '   ', '.vtt', ''), 'youtube-captions.vtt');
 check('saveFile does not double up an existing extension',
   api.saveFile('body', 'notes.md', '.md', 'fallback'), 'notes.md');
+check('saveFile includes the selected transcript after a custom basename',
+  api.saveFile('body', 'notes.md', '.md', 'fallback', 'Hebrew'), 'notes-Hebrew.md');
+check('saveFile includes the selected transcript after the video title',
+  api.saveFile('body', null, '.vtt', 'My Talk - YouTube', 'English (auto-generated)'),
+  'My Talk-English (auto-generated).vtt');
+check('saveFile sanitizes the selected transcript suffix',
+  api.saveFile('body', 'notes', '.md', 'fallback', 'Hebrew/../other'), 'notes-Hebrew_.._other.md');
 
 // --- xmlToCues (always runs; see the DOMParser resolution above) ------------
 const xml = '<transcript>' +

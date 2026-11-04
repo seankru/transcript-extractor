@@ -20,6 +20,7 @@
     #status { font-size: 12px; color: #333; margin-top: 10px; min-height: 36px; white-space: pre-wrap; line-height: 1.4; }
     #status.error { color: #c50f1f; }
     .meta { font-size: 11px; color: #666; margin-top: 10px; line-height: 1.4; }
+    #track-help { margin: -4px 0 10px; }
     .format-row { display: flex; gap: 12px; margin: 0 0 10px; font-size: 12px; }
     .format-row label { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: #333; cursor: pointer; }
     .format-row input[type=radio] { margin: 0; }
@@ -29,10 +30,11 @@
   <h1>YouTube Caption Extractor</h1>
   <label for="filename">Filename (without extension; blank = video title)</label>
   <input type="text" id="filename" placeholder="auto">
-  <label for="track">Caption track</label>
-  <select id="track" disabled>
+  <label for="track">Transcript language / version</label>
+  <select id="track" aria-describedby="track-help" disabled>
     <option>Loading caption tracks...</option>
   </select>
+  <div id="track-help" class="meta">Your preferred languages are listed first, with publisher-supplied captions preferred within each language. Choose any listed version.</div>
   <label>Format</label>
   <div class="format-row">
     <label><input type="radio" name="format" value="md" checked> Markdown (.md)</label>

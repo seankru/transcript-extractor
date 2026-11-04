@@ -29,6 +29,22 @@ extension:
 No DOM scraping, no remote API beyond the same CDN your browser is
 already loading the video from.
 
+## Transcript language / version
+
+The popup lists the primary recording's published `signed_captions` variants
+when Substack supplies them, including language codes. Choose a specific entry
+to export it as either Markdown or WebVTT. Explicit choices use that caption
+file, not the original-language `transcription.json`, so a translated selection
+cannot silently export the original text. Preview and sidebar captions remain
+excluded. An unavailable or partial explicit choice reports an error instead
+of substituting another language or starting Whisper.
+Explicit selections append the language code to the filename, for example
+`My post-fr.md`, including when a custom basename is entered.
+
+**Automatic** preserves the existing original-JSON-first Markdown path and
+English/first-caption WebVTT preference. Open the popup again after navigating
+to another post or when the site publishes new choices.
+
 ## Permissions
 
 * `activeTab`, `scripting` — to inject the extractor when you click

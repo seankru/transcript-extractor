@@ -237,7 +237,7 @@ function popupEnvironment(settings = {}) {
   let failRead = false;
   let failWrite = false;
   for (const id of ['auto-transcribe', 'transcription-confirmation', 'transcription-confirm',
-    'transcription-cancel', 'extract', 'status']) {
+    'transcription-cancel', 'extract', 'status', 'track']) {
     elements[id] = {
       checked: false, hidden: true, disabled: false, textContent: '',
       classList: { add() {}, remove() {}, toggle() {} },
@@ -275,6 +275,16 @@ function popupEnvironment(settings = {}) {
   };
 }
 const fallbackTab = { id: 42, url: 'https://pub.substack.com/p/post' };
+
+test('changing transcript selection invalidates a pending Whisper confirmation', async () => {
+  const popup = popupEnvironment();
+  await popup.client.start('substack', fallbackTab, 'md', '');
+  popup.elements.track.listeners.change();
+  await popup.elements['transcription-confirm'].listeners.click();
+  assert.equal(popup.elements['transcription-confirmation'].hidden, true);
+  assert.match(popup.elements.status.textContent, /Transcript selection changed/);
+  assert.equal(popup.calls.some(call => call.type === 'transcribe'), false);
+});
 
 test('default fallback prompts without invoking the helper, and cancel starts nothing', async () => {
   const { client, elements, calls } = popupEnvironment();

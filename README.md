@@ -14,12 +14,25 @@ icons, listing checklist) more than they share code.
 
 | Extension | Folder | Hosts | Status |
 | --- | --- | --- | --- |
-| Stream Transcript Extractor | [extensions/stream](extensions/stream) | SharePoint / Microsoft Stream / Teams recap | Edge Add-ons draft (v0.2.0) |
-| Substack Transcript Extractor | [extensions/substack](extensions/substack) | `*.substack.com` video posts | Unpacked install only (v0.1.4) |
-| YouTube Caption Extractor | [extensions/youtube](extensions/youtube) | `*.youtube.com` videos | Unpacked install only (v0.1.1) |
+| Stream Transcript Extractor | [extensions/stream](extensions/stream) | SharePoint / Microsoft Stream / Teams recap | Edge Add-ons draft (v0.2.1) |
+| Substack Transcript Extractor | [extensions/substack](extensions/substack) | `*.substack.com` video posts | Unpacked install only (v0.1.5) |
+| YouTube Caption Extractor | [extensions/youtube](extensions/youtube) | `*.youtube.com` videos | Unpacked install only (v0.1.2) |
 
 Planned sibling: Zoom (cloud-recording VTT export). It will appear under
 `extensions/zoom/` when implemented.
+
+## Choosing a transcript
+
+| Extractor | Available language / version choices |
+| --- | --- |
+| YouTube | Advertised caption tracks, sorted by browser/system language preferences, with publisher-supplied captions preferred within each language. The first entry is selected; regional and auto-generated versions remain available. The panel fallback follows the explicit choice. |
+| Substack | Published `signed_captions` variants for the primary recording. Explicit choices use that caption file for both Markdown and VTT, not potentially different-language word-level JSON. |
+| Stream / SharePoint | Visible transcripts advertised in recording metadata, with the platform default identified. Teams/legacy surfaces without that list retain the current automatic/pane path. |
+| Spotify draft | The current read-along integration exposes a single loaded transcript, not a verified list of alternatives. No speculative language selector is offered. |
+
+An explicit unavailable choice reports an error instead of silently substituting
+another language or starting Whisper. Choices are scoped to the current media;
+reopen the popup after navigation to discover its transcripts.
 
 ## Why separate extensions instead of one mega-extension?
 
@@ -52,9 +65,9 @@ LICENSE                # MIT
 ## Build a release zip
 
 ```pwsh
-./scripts/build.ps1 -Name stream     # → dist/stream-transcript-extractor-v0.2.0.zip
-./scripts/build.ps1 -Name substack   # → dist/substack-transcript-extractor-v0.1.4.zip
-./scripts/build.ps1 -Name youtube    # → dist/youtube-transcript-extractor-v0.1.1.zip
+./scripts/build.ps1 -Name stream     # → dist/stream-transcript-extractor-v0.2.1.zip
+./scripts/build.ps1 -Name substack   # → dist/substack-transcript-extractor-v0.1.5.zip
+./scripts/build.ps1 -Name youtube    # → dist/youtube-transcript-extractor-v0.1.2.zip
 ```
 
 The build script prepares the shared runtime and zips only browser files

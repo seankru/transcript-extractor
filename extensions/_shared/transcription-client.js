@@ -133,6 +133,15 @@ const localTranscription = (() => {
     status.textContent = 'Local transcription cancelled. No recording was downloaded or job started.';
     status.classList.remove('error');
   });
+  document.getElementById('track')?.addEventListener('change', () => {
+    if (!pending) return;
+    pending = null;
+    confirmation.hidden = true;
+    statusVersion++;
+    const status = document.getElementById('status');
+    status.textContent = 'Transcript selection changed. Click Extract to use the selected transcript.';
+    status.classList.remove('error');
+  });
 
   // Defer until the popup's existing caption discovery has initialized.
   window.addEventListener('load', restore);
